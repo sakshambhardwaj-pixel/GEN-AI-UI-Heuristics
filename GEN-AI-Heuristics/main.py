@@ -298,120 +298,337 @@ async def login_and_crawl_all_pages(url: str, username: str, password: str, logi
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
+
+        # Block heavy resources to speed up crawling
+        async def route_handler(route):
+            if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                return await route.abort()
+            return await route.continue_()
+
+        await context.route("**/*", route_handler)
+
         page = await context.new_page()
+        page.set_default_navigation_timeout(120000)
+        page.set_default_timeout(120000)
 
         visited_urls = set()
         url_to_content = {}
+        max_pages = 50
+        max_depth = 2
 
-        await page.goto(login_url)
-        await page.fill(username_selector, username)
-        await page.fill(password_selector, password)
-        await page.click(submit_selector)
-        await page.wait_for_load_state("networkidle")
+        # Login flow with more lenient waits
+        try:
+            await page.goto(login_url, wait_until="domcontentloaded", timeout=120000)
+            await page.fill(username_selector, username)
+            await page.fill(password_selector, password)
+            await page.click(submit_selector)
+            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_timeout(500)
+        except Exception as e:
+            print(f"Login navigation error: {e}")
 
-        async def crawl(current_url):
-            if current_url in visited_urls:
+        base_domain = urlparse(login_url).netloc
+
+        async def crawl(current_url, depth):
+            if current_url in visited_urls or len(visited_urls) >= max_pages or depth > max_depth:
                 return
             visited_urls.add(current_url)
-            await page.goto(current_url)
-            await page.wait_for_load_state("networkidle")
+            try:
+                await page.goto(current_url, wait_until="domcontentloaded", timeout=120000)
+                await page.wait_for_timeout(300)
+            except Exception as e:
+                print(f"Timeout or navigation error for {current_url}: {e}")
+                return
 
-            content = await page.content()
-            cleaned_content = clean_html_content(content)
-            url_to_content[current_url] = cleaned_content
-            print(f"Crawled {current_url} with cleaned content length {len(cleaned_content)}")
+            try:
+                content = await page.content()
+                cleaned_content = clean_html_content(content)
+                url_to_content[current_url] = cleaned_content
+                print(f"Crawled {current_url} with cleaned content length {len(cleaned_content)}")
+            except Exception as e:
+                print(f"Content extraction error at {current_url}: {e}")
+                return
 
-            links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-            base_domain = urlparse(login_url).netloc
+            try:
+                links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+            except Exception as e:
+                print(f"Link extraction error at {current_url}: {e}")
+                return
+
             for link in links:
                 link_domain = urlparse(link).netloc
                 if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
-                    await crawl(link)
+                    await crawl(link, depth + 1)
 
-        await crawl(url)
+        await crawl(url, 0)
+        await browser.close()
+        return url_to_content
+
+async def crawl_all_pages_no_login(start_url: str):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+
+        # Block heavy resources to reduce timeouts
+        async def route_handler(route):
+            if route.request.resource_type in {"image", "media", "font", "stylesheet"}:
+                return await route.abort()
+            return await route.continue_()
+
+        await context.route("**/*", route_handler)
+
+        page = await context.new_page()
+        page.set_default_navigation_timeout(120000)
+        page.set_default_timeout(120000)
+
+        visited_urls = set()
+        url_to_content = {}
+        base_domain = urlparse(start_url).netloc
+        max_pages = 50
+        max_depth = 2
+
+        async def crawl(current_url, depth):
+            if current_url in visited_urls or len(visited_urls) >= max_pages or depth > max_depth:
+                return
+            visited_urls.add(current_url)
+            try:
+                await page.goto(current_url, wait_until="domcontentloaded", timeout=120000)
+                await page.wait_for_timeout(300)
+            except Exception as e:
+                print(f"Timeout or navigation error for {current_url}: {e}")
+                return
+
+            try:
+                content = await page.content()
+                cleaned_content = clean_html_content(content)
+                url_to_content[current_url] = cleaned_content
+                print(f"Crawled {current_url} with cleaned content length {len(cleaned_content)}")
+            except Exception as e:
+                print(f"Content extraction error at {current_url}: {e}")
+                return
+
+            try:
+                links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+            except Exception as e:
+                print(f"Link extraction error at {current_url}: {e}")
+                return
+
+            for link in links:
+                link_domain = urlparse(link).netloc
+                if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
+                    await crawl(link, depth + 1)
+
+        await crawl(start_url, 0)
         await browser.close()
         return url_to_content
 
 def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map):
     results = asyncio.run(
         login_and_crawl_all_pages(
-            url=start_url, username=username, password=password, login_url=login_url,
+            url=login_url, username=username, password=password, login_url=login_url,
             username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
         )
     )
 
     evaluations = {}
-    placeholder = st.empty()
-
+    
+    # Create containers for live updates
+    st.subheader("📊 Live Evaluation Progress")
+    progress_container = st.container()
+    results_container = st.container()
+    
+    total_evaluations = len(results) * len(prompt_map)
+    current_eval = 0
+    
+    with progress_container:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+    
     for url, content in results.items():
+        with results_container:
+            st.markdown(f"### 🌐 Evaluating URL: `{url}`")
+        
         for heuristic, prompt in prompt_map.items():
+            current_eval += 1
+            
+            # Update progress
+            with progress_container:
+                progress_bar.progress(current_eval / total_evaluations)
+                status_text.info(f"⏳ Processing: **{heuristic}** ({current_eval}/{total_evaluations})")
+            
             prompt_with_url = prompt.replace("[Enter Website URL Here]", login_url)
             result = evaluate_heuristic_with_llm(prompt_with_url, content)
+            
+            # Store result
             if heuristic not in evaluations:
                 evaluations[heuristic] = {}
-                evaluations[heuristic][url] = {"output": result}
-                placeholder.json(evaluations)
+            evaluations[heuristic][url] = {"output": result}
+            
+            # Display result immediately
+            with results_container:
+                with st.expander(f"✅ **{heuristic}** - Completed", expanded=False):
+                    st.markdown(f"**URL:** {url}")
+                    st.text_area(
+                        "Evaluation Result",
+                        value=result,
+                        height=300,
+                        key=f"{heuristic}_{url}_{current_eval}"
+                    )
+                    st.markdown("---")
     
-    placeholder.empty()
+    with progress_container:
+        progress_bar.progress(1.0)
+        status_text.success(f"✅ All evaluations complete! ({total_evaluations} total)")
+    
+    return evaluations
+
+def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 10):
+    results = asyncio.run(
+        crawl_all_pages_no_login(start_url)
+    )
+
+    evaluations = {}
+    urls = list(results.items())[:max_pages_to_evaluate]
+    
+    # Create containers for live updates
+    st.subheader("📊 Live Evaluation Progress")
+    progress_container = st.container()
+    results_container = st.container()
+    
+    total_evaluations = len(urls) * len(prompt_map)
+    current_eval = 0
+    
+    with progress_container:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+    for url, content in urls:
+        with results_container:
+            st.markdown(f"### 🌐 Evaluating URL: `{url}`")
+        
+        for heuristic, prompt in prompt_map.items():
+            current_eval += 1
+            
+            # Update progress
+            with progress_container:
+                progress_bar.progress(current_eval / total_evaluations)
+                status_text.info(f"⏳ Processing: **{heuristic}** ({current_eval}/{total_evaluations})")
+            
+            prompt_with_url = prompt.replace("[Enter Website URL Here]", start_url)
+            result = evaluate_heuristic_with_llm(prompt_with_url, content)
+            
+            # Store result
+            if heuristic not in evaluations:
+                evaluations[heuristic] = {}
+            evaluations[heuristic][url] = {"output": result}
+            
+            # Display result immediately
+            with results_container:
+                with st.expander(f"✅ **{heuristic}** - Completed", expanded=False):
+                    st.markdown(f"**URL:** {url}")
+                    st.text_area(
+                        "Evaluation Result",
+                        value=result,
+                        height=300,
+                        key=f"{heuristic}_{url}_{current_eval}"
+                    )
+                    st.markdown("---")
+    
+    with progress_container:
+        progress_bar.progress(1.0)
+        status_text.success(f"✅ All evaluations complete! ({total_evaluations} total)")
+
     return evaluations
 
 def main():
     st.header("Heuristic Evaluation")
 
+
     with st.sidebar:
         st.title("Upload Excel file")
         uploaded_file = st.file_uploader("Upload Heuristic Excel file with AI Prompts sheet", type=["xlsx", "xls"])
-        st.title("Website Credentials")
-        login_url = st.text_input("Login URL", value="https://www.saucedemo.com/")
-        start_url = st.text_input("Start URL", value="https://www.saucedemo.com/inventory.html")
-        username = st.text_input("Username", value="standard_user")
-        password = st.text_input("Password", value="secret_sauce", type="password")
+        st.title("Target Website")
+        requires_login = st.checkbox("Site requires login", value=True)
+        start_url = None
+        max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=10)
         
-        username_selector = st.text_input(
-            "Username Selector", 
-            value="#user-name",
-            help="CSS selector for the username input field. Right-click on the username field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #username, .username-field, input[name='username']"
-        )
+        # FIX: Initialize login_url with a default value
+        login_url = None
+        username = None
+        password = None
+        username_selector = None
+        password_selector = None
+        submit_selector = None
         
-        password_selector = st.text_input(
-            "Password Selector", 
-            value="#password",
-            help="CSS selector for the password input field. Right-click on the password field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #password, .password-field, input[type='password']"
-        )
+        if requires_login:
+            login_url = st.text_input("Login URL", value="https://www.saucedemo.com/")
+            username = st.text_input("Username", value="standard_user")
+            password = st.text_input("Password", value="secret_sauce", type="password")
         
-        submit_selector = st.text_input(
-            "Submit Button Selector", 
-            value="#login-button",
-            help="CSS selector for the login/submit button. Right-click on the login button, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #login-btn, .submit-button, button[type='submit']"
-        )
+            username_selector = st.text_input(
+                "Username Selector", 
+                value="#user-name",
+                help="CSS selector for the username input field. Right-click on the username field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #username, .username-field, input[name='username']"
+            )
+            
+            password_selector = st.text_input(
+                "Password Selector", 
+                value="#password",
+                help="CSS selector for the password input field. Right-click on the password field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #password, .password-field, input[type='password']"
+            )
+            
+            submit_selector = st.text_input(
+                "Submit Button Selector", 
+                value="#login-button",
+                help="CSS selector for the login/submit button. Right-click on the login button, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #login-btn, .submit-button, button[type='submit']"
+            )
+        
+        # Refresh button
+        st.markdown("---")
+        if st.button("🔄 Refresh", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
 
     if uploaded_file:
         prompt_map = fetch_and_map_prompts(uploaded_file)
         st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
 
+
         if st.button("Run Crawl and Evaluate"):
             with st.spinner("Crawling site and evaluating..."):
-                evaluations = run_crawl_and_evaluate_stream(
-                    start_url, username, password, login_url,
-                    username_selector, password_selector, submit_selector, prompt_map,
-                )
+                if requires_login:
+                    evaluations = run_crawl_and_evaluate_stream(
+                        start_url, username, password, login_url,
+                        username_selector, password_selector, submit_selector, prompt_map,
+                    )
+                else:
+                    evaluations = run_crawl_and_evaluate_public(
+                        start_url,
+                        prompt_map,
+                        max_pages_to_evaluate=int(max_pages_to_evaluate),
+                    )
                 st.session_state["evaluations"] = evaluations
                 st.success("Evaluation complete")
                 st.json(st.session_state["evaluations"])
 
+
         if "evaluations" in st.session_state:
             st.subheader("Saved Evaluation Output")
+
 
             if st.button("Generate Enhanced Report (HTML)"):
                 with st.spinner("Generating comprehensive HTML report..."):
                     analysis_json = analyze_each_heuristic_individually_for_report(st.session_state["evaluations"])
-                    print('Analysis JSON:', analysis_json)
                     
                     if not analysis_json:
                         st.error("Failed to generate analysis. Please try again.")
                         return
                     
-                    site_name = login_url.replace("https://", "").replace("http://", "").split('/')
+                    # FIX: Use login_url if available, otherwise use start_url
+                    url_to_parse = login_url if (requires_login and login_url) else start_url
+                    site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0]
                     
                     html_report = generate_html_from_analysis_json(
                         analysis_json, 
@@ -420,6 +637,7 @@ def main():
                     )
                     
                     st.session_state["html_report"] = html_report
+
 
         if "html_report" in st.session_state and st.session_state["html_report"]:
             col1, col2 = st.columns(2)
@@ -432,8 +650,11 @@ def main():
                     mime="text/html",
                 )
 
+
     else:
         st.info("Please upload an Excel file to start.")
+
+
 
 if __name__ == "__main__":
     main()
