@@ -482,7 +482,7 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
     
     return evaluations
 
-def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 10):
+def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1):
     results = asyncio.run(
         crawl_all_pages_no_login(start_url)
     )
