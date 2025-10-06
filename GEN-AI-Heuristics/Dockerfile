@@ -20,7 +20,7 @@ COPY main.py .
 COPY html_generator.py .
 
 # Copy .env file if it exists (make it optional)
-COPY .env* ./ || true
+RUN if [ -f .env ]; then cp .env /app/; fi
 
 # Expose Streamlit's default port
 EXPOSE 8501
