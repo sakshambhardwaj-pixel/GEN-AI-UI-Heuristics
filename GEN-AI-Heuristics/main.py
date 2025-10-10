@@ -550,7 +550,7 @@ def main():
         st.title("Target Website")
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
-        max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=10)
+        max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=1)
         
         # FIX: Initialize login_url with a default value
         login_url = None
@@ -582,6 +582,10 @@ def main():
                 value="#login-button",
                 help="CSS selector for the login/submit button. Right-click on the login button, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #login-btn, .submit-button, button[type='submit']"
             )
+        else:
+            # For public sites: show site URL input when login not required
+            start_url = st.text_input("Site URL", value="https://www.saucedemo.com/", help="Enter the public site URL to crawl")
+
         
         # Refresh button
         st.markdown("---")
