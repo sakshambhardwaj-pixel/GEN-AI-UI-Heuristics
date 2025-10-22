@@ -4,7 +4,7 @@ import json
 from dotenv import load_dotenv
 
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 import pandas as pd
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
