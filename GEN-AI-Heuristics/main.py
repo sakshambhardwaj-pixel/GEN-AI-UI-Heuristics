@@ -1,6 +1,10 @@
 import asyncio
+import sys
 import json
 from dotenv import load_dotenv
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 import pandas as pd
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
@@ -15,6 +19,51 @@ from datetime import datetime
 from html_generator import generate_html_from_analysis_json, create_fallback_html_report
 
 load_dotenv()
+
+
+def convert_analysis_to_csv(analysis_json):
+    """Converts the analysis JSON to a CSV string."""
+    if not analysis_json:
+        return ""
+
+    records = []
+    for heuristic_name, data in analysis_json.items():
+        record = {
+            "Heuristic": heuristic_name,
+            "Score": data.get("total_score", ""),
+            "Grade": data.get("grade", ""),
+            "Performance Level": data.get("performance_level", ""),
+            "Pages Evaluated": data.get("pages_evaluated", ""),
+            "Definition": data.get("definition", ""),
+            "Detailed Assessment": data.get("detailed_assessment", ""),
+            "Business Impact": data.get("business_impact", ""),
+            "User Experience Impact": data.get("user_experience_impact", ""),
+            "Key Strengths": "; ".join(data.get("key_strengths", [])),
+            "Key Weaknesses": "; ".join(data.get("key_weaknesses", [])),
+            "Quick Wins": "; ".join(data.get("quick_wins", [])),
+            "Methodology Notes": data.get("methodology_notes", ""),
+            "Confidence Score": data.get("confidence_score", ""),
+        }
+
+        for i, subtopic in enumerate(data.get("subtopics", [])):
+            record[f"Subtopic {i+1} Name"] = subtopic.get("name", "")
+            record[f"Subtopic {i+1} Score"] = subtopic.get("score", "")
+            record[f"Subtopic {i+1} Description"] = subtopic.get("description", "")
+            record[f"Subtopic {i+1} Impact Level"] = subtopic.get("impact_level", "")
+
+        for i, recommendation in enumerate(data.get("recommendations", [])):
+            if isinstance(recommendation, dict):
+                record[f"Recommendation {i+1} Priority"] = recommendation.get("priority", "")
+                record[f"Recommendation {i+1} Effort"] = recommendation.get("effort", "")
+                record[f"Recommendation {i+1} Timeframe"] = recommendation.get("timeframe", "")
+                record[f"Recommendation {i+1} Recommendation"] = recommendation.get("recommendation", "")
+                record[f"Recommendation {i+1} Expected Outcome"] = recommendation.get("expected_outcome", "")
+                record[f"Recommendation {i+1} Implementation Notes"] = recommendation.get("implementation_notes", "")
+
+        records.append(record)
+
+    df = pd.DataFrame(records)
+    return df.to_csv(index=False).encode('utf-8')
 
 def fetch_and_map_prompts(uploaded_file):
     if uploaded_file is None:
@@ -422,13 +471,61 @@ async def crawl_all_pages_no_login(start_url: str):
         await browser.close()
         return url_to_content
 
-def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map):
-    results = asyncio.run(
-        login_and_crawl_all_pages(
-            url=login_url, username=username, password=password, login_url=login_url,
-            username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
+
+async def crawl_specific_urls(urls: list[str], login_url: str = None, username: str = None, password: str = None, username_selector: str = None, password_selector: str = None, submit_selector: str = None, no_login: bool = False):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+        page.set_default_navigation_timeout(120000)
+
+        if not no_login and login_url:
+            try:
+                await page.goto(login_url, wait_until="domcontentloaded")
+                if username and password and username_selector and password_selector and submit_selector:
+                    await page.fill(username_selector, username)
+                    await page.fill(password_selector, password)
+                    await page.click(submit_selector)
+                    await page.wait_for_load_state("domcontentloaded")
+            except Exception as e:
+                print(f"Login failed: {e}")
+                await browser.close()
+                return {}
+
+        url_to_content = {}
+        for url in urls:
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+                content = await page.content()
+                cleaned_content = clean_html_content(content)
+                url_to_content[url] = cleaned_content
+            except Exception as e:
+                print(f"Failed to crawl {url}: {e}")
+
+        await browser.close()
+        return url_to_content
+
+
+def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map, specific_urls=None):
+    if specific_urls:
+        results = asyncio.run(
+            crawl_specific_urls(
+                urls=specific_urls,
+                login_url=login_url,
+                username=username,
+                password=password,
+                username_selector=username_selector,
+                password_selector=password_selector,
+                submit_selector=submit_selector
+            )
         )
-    )
+    else:
+        results = asyncio.run(
+            login_and_crawl_all_pages(
+                url=login_url, username=username, password=password, login_url=login_url,
+                username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
+            )
+        )
 
     evaluations = {}
     
@@ -482,10 +579,13 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
     
     return evaluations
 
-def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1):
-    results = asyncio.run(
-        crawl_all_pages_no_login(start_url)
-    )
+def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None):
+    if specific_urls:
+        results = asyncio.run(crawl_specific_urls(specific_urls, no_login=True))
+    else:
+        results = asyncio.run(
+            crawl_all_pages_no_login(start_url)
+        )
 
     evaluations = {}
     urls = list(results.items())[:max_pages_to_evaluate]
@@ -551,6 +651,7 @@ def main():
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
         max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=1)
+        specific_urls_input = st.text_area("Enter specific URLs to evaluate (one per line)")
         
         # FIX: Initialize login_url with a default value
         login_url = None
@@ -601,17 +702,20 @@ def main():
 
 
         if st.button("Run Crawl and Evaluate"):
+            specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
             with st.spinner("Crawling site and evaluating..."):
                 if requires_login:
                     evaluations = run_crawl_and_evaluate_stream(
                         start_url, username, password, login_url,
                         username_selector, password_selector, submit_selector, prompt_map,
+                        specific_urls=specific_urls
                     )
                 else:
                     evaluations = run_crawl_and_evaluate_public(
                         start_url,
                         prompt_map,
                         max_pages_to_evaluate=int(max_pages_to_evaluate),
+                        specific_urls=specific_urls
                     )
                 st.session_state["evaluations"] = evaluations
                 st.success("Evaluation complete")
@@ -625,6 +729,7 @@ def main():
             if st.button("Generate Enhanced Report (HTML)"):
                 with st.spinner("Generating comprehensive HTML report..."):
                     analysis_json = analyze_each_heuristic_individually_for_report(st.session_state["evaluations"])
+                    st.session_state["analysis_json"] = analysis_json
                     
                     if not analysis_json:
                         st.error("Failed to generate analysis. Please try again.")
@@ -653,6 +758,15 @@ def main():
                     file_name="enhanced_heuristic_evaluation_report.html",
                     mime="text/html",
                 )
+            with col2:
+                if "analysis_json" in st.session_state:
+                    csv_data = convert_analysis_to_csv(st.session_state["analysis_json"])
+                    st.download_button(
+                        label="📄 Download CSV Report",
+                        data=csv_data,
+                        file_name="heuristic_evaluation_report.csv",
+                        mime="text/csv",
+                    )
 
 
     else:
