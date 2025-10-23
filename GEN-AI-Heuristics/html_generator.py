@@ -677,6 +677,15 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
             <p>{data.get('methodology_notes', '')}</p>
         </div>"""
 
+        analyzed_urls = data.get('analyzed_urls', [])
+        if analyzed_urls:
+            urls_html = "".join(f"<li><a href='{url}' target='_blank'>{url}</a></li>" for url in analyzed_urls)
+            html_template += f"""
+        <div class="analyzed-urls" style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 1.5rem; border-radius: 7px; margin: 2rem 0;">
+            <h4>URLs Analyzed for this Heuristic</h4>
+            <ul>{urls_html}</ul>
+        </div>"""
+
         html_template += """</section>"""
 
     # Generate conclusion content

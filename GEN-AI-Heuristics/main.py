@@ -181,6 +181,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
             else:
                 truncated_pages_data[url] = data
         
+        evaluated_urls = list(pages_data.keys())
         # Enhanced analysis prompt for more detailed information
         individual_analysis_prompt = f"""
         You are a UX expert analyzing heuristic evaluation data for "{heuristic_name}".
@@ -224,6 +225,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
             "quick_wins": ["<low effort, high impact improvements>", "<another quick win>"],
             "methodology_notes": "<any notes about the evaluation process, limitations, or data quality>",
             "pages_evaluated": {len(pages_data)},
+            "analyzed_urls": evaluated_urls,
             "confidence_score": "<High/Medium/Low confidence in this analysis based on data quality>"
         }}
 
@@ -340,6 +342,7 @@ def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -
         "quick_wins": ["Manual review of key pages", "User feedback collection"],
         "methodology_notes": "Fallback analysis due to processing limitations. Manual review recommended for accurate assessment.",
         "pages_evaluated": len(pages_data),
+        "analyzed_urls": list(pages_data.keys()),
         "confidence_score": "Low"
     }
 
@@ -506,11 +509,31 @@ async def crawl_specific_urls(urls: list[str], login_url: str = None, username: 
         return url_to_content
 
 
-def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map, specific_urls=None):
-    if specific_urls:
-        results = asyncio.run(
+def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map, specific_urls=None, heuristic_url_map=None):
+    evaluations = {}
+
+    # Create containers for live updates
+    st.subheader("📊 Live Evaluation Progress")
+    progress_container = st.container()
+    results_container = st.container()
+
+    all_urls_to_crawl = set(specific_urls or [])
+    if heuristic_url_map:
+        for urls in heuristic_url_map.values():
+            all_urls_to_crawl.update(urls)
+
+    if not all_urls_to_crawl:
+        # Fallback to crawling all pages if no specific URLs are provided
+        crawled_content = asyncio.run(
+            login_and_crawl_all_pages(
+                url=login_url, username=username, password=password, login_url=login_url,
+                username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
+            )
+        )
+    else:
+        crawled_content = asyncio.run(
             crawl_specific_urls(
-                urls=specific_urls,
+                urls=list(all_urls_to_crawl),
                 login_url=login_url,
                 username=username,
                 password=password,
@@ -519,52 +542,44 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
                 submit_selector=submit_selector
             )
         )
-    else:
-        results = asyncio.run(
-            login_and_crawl_all_pages(
-                url=login_url, username=username, password=password, login_url=login_url,
-                username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
-            )
-        )
 
-    evaluations = {}
+    total_evaluations = 0
+    for heuristic in prompt_map:
+        if heuristic_url_map and heuristic in heuristic_url_map:
+            total_evaluations += len(heuristic_url_map[heuristic])
+        else:
+            total_evaluations += len(crawled_content)
     
-    # Create containers for live updates
-    st.subheader("📊 Live Evaluation Progress")
-    progress_container = st.container()
-    results_container = st.container()
-    
-    total_evaluations = len(results) * len(prompt_map)
     current_eval = 0
-    
+
     with progress_container:
         progress_bar = st.progress(0)
         status_text = st.empty()
-    
-    for url, content in results.items():
-        with results_container:
-            st.markdown(f"### 🌐 Evaluating URL: `{url}`")
+
+    for heuristic, prompt in prompt_map.items():
+        urls_to_evaluate = (heuristic_url_map or {}).get(heuristic, crawled_content.keys())
         
-        for heuristic, prompt in prompt_map.items():
+        for url in urls_to_evaluate:
+            if url not in crawled_content:
+                st.warning(f"URL {url} specified for {heuristic} was not crawled. Skipping.")
+                continue
+
+            content = crawled_content[url]
             current_eval += 1
             
-            # Update progress
             with progress_container:
-                progress_bar.progress(current_eval / total_evaluations)
-                status_text.info(f"⏳ Processing: **{heuristic}** ({current_eval}/{total_evaluations})")
-            
-            prompt_with_url = prompt.replace("[Enter Website URL Here]", login_url)
+                progress_bar.progress(current_eval / total_evaluations if total_evaluations > 0 else 0)
+                status_text.info(f"⏳ Processing: **{heuristic}** on {url} ({current_eval}/{total_evaluations})")
+
+            prompt_with_url = prompt.replace("[Enter Website URL Here]", url)
             result = evaluate_heuristic_with_llm(prompt_with_url, content)
             
-            # Store result
             if heuristic not in evaluations:
                 evaluations[heuristic] = {}
             evaluations[heuristic][url] = {"output": result}
-            
-            # Display result immediately
+
             with results_container:
-                with st.expander(f"✅ **{heuristic}** - Completed", expanded=False):
-                    st.markdown(f"**URL:** {url}")
+                with st.expander(f"✅ **{heuristic}** on `{url}` - Completed", expanded=False):
                     st.text_area(
                         "Evaluation Result",
                         value=result,
@@ -572,60 +587,67 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
                         key=f"{heuristic}_{url}_{current_eval}"
                     )
                     st.markdown("---")
-    
+
     with progress_container:
         progress_bar.progress(1.0)
         status_text.success(f"✅ All evaluations complete! ({total_evaluations} total)")
-    
+
     return evaluations
 
-def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None):
-    if specific_urls:
-        results = asyncio.run(crawl_specific_urls(specific_urls, no_login=True))
-    else:
-        results = asyncio.run(
-            crawl_all_pages_no_login(start_url)
-        )
-
+def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None, heuristic_url_map=None):
     evaluations = {}
-    urls = list(results.items())[:max_pages_to_evaluate]
-    
-    # Create containers for live updates
+
     st.subheader("📊 Live Evaluation Progress")
     progress_container = st.container()
     results_container = st.container()
-    
-    total_evaluations = len(urls) * len(prompt_map)
+
+    all_urls_to_crawl = set(specific_urls or [])
+    if heuristic_url_map:
+        for urls in heuristic_url_map.values():
+            all_urls_to_crawl.update(urls)
+
+    if not all_urls_to_crawl:
+        crawled_content = asyncio.run(crawl_all_pages_no_login(start_url))
+    else:
+        crawled_content = asyncio.run(crawl_specific_urls(list(all_urls_to_crawl), no_login=True))
+
+    total_evaluations = 0
+    for heuristic in prompt_map:
+        if heuristic_url_map and heuristic in heuristic_url_map:
+            total_evaluations += len(heuristic_url_map[heuristic])
+        else:
+            total_evaluations += len(crawled_content)
+
     current_eval = 0
-    
+
     with progress_container:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-    for url, content in urls:
-        with results_container:
-            st.markdown(f"### 🌐 Evaluating URL: `{url}`")
-        
-        for heuristic, prompt in prompt_map.items():
+    for heuristic, prompt in prompt_map.items():
+        urls_to_evaluate = (heuristic_url_map or {}).get(heuristic, crawled_content.keys())
+
+        for url in urls_to_evaluate:
+            if url not in crawled_content:
+                st.warning(f"URL {url} specified for {heuristic} was not crawled. Skipping.")
+                continue
+            
+            content = crawled_content[url]
             current_eval += 1
-            
-            # Update progress
+
             with progress_container:
-                progress_bar.progress(current_eval / total_evaluations)
-                status_text.info(f"⏳ Processing: **{heuristic}** ({current_eval}/{total_evaluations})")
-            
-            prompt_with_url = prompt.replace("[Enter Website URL Here]", start_url)
+                progress_bar.progress(current_eval / total_evaluations if total_evaluations > 0 else 0)
+                status_text.info(f"⏳ Processing: **{heuristic}** on {url} ({current_eval}/{total_evaluations})")
+
+            prompt_with_url = prompt.replace("[Enter Website URL Here]", url)
             result = evaluate_heuristic_with_llm(prompt_with_url, content)
-            
-            # Store result
+
             if heuristic not in evaluations:
                 evaluations[heuristic] = {}
             evaluations[heuristic][url] = {"output": result}
-            
-            # Display result immediately
+
             with results_container:
-                with st.expander(f"✅ **{heuristic}** - Completed", expanded=False):
-                    st.markdown(f"**URL:** {url}")
+                with st.expander(f"✅ **{heuristic}** on `{url}` - Completed", expanded=False):
                     st.text_area(
                         "Evaluation Result",
                         value=result,
@@ -633,7 +655,7 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
                         key=f"{heuristic}_{url}_{current_eval}"
                     )
                     st.markdown("---")
-    
+
     with progress_container:
         progress_bar.progress(1.0)
         status_text.success(f"✅ All evaluations complete! ({total_evaluations} total)")
@@ -653,6 +675,10 @@ def main():
         max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=1)
         specific_urls_input = st.text_area("Enter specific URLs to evaluate (one per line)")
         
+        # Per-heuristic URL assignment
+        assign_per_heuristic = st.checkbox("Assign URLs to specific heuristics")
+        heuristic_url_map = {}
+
         # FIX: Initialize login_url with a default value
         login_url = None
         username = None
@@ -698,8 +724,16 @@ def main():
 
     if uploaded_file:
         prompt_map = fetch_and_map_prompts(uploaded_file)
+        st.session_state.prompt_map = prompt_map
         st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
 
+    if assign_per_heuristic:
+        if "prompt_map" in st.session_state and st.session_state.prompt_map:
+            st.subheader("Assign URLs to Heuristics")
+            for heuristic in st.session_state.prompt_map.keys():
+                urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
+                if urls:
+                    heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
 
         if st.button("Run Crawl and Evaluate"):
             specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
@@ -707,15 +741,17 @@ def main():
                 if requires_login:
                     evaluations = run_crawl_and_evaluate_stream(
                         start_url, username, password, login_url,
-                        username_selector, password_selector, submit_selector, prompt_map,
-                        specific_urls=specific_urls
+                        username_selector, password_selector, submit_selector, st.session_state.prompt_map,
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map
                     )
                 else:
                     evaluations = run_crawl_and_evaluate_public(
                         start_url,
-                        prompt_map,
+                        st.session_state.prompt_map,
                         max_pages_to_evaluate=int(max_pages_to_evaluate),
-                        specific_urls=specific_urls
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map
                     )
                 st.session_state["evaluations"] = evaluations
                 st.success("Evaluation complete")
