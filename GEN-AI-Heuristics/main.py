@@ -346,7 +346,7 @@ def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -
         "confidence_score": "Low"
     }
 
-async def login_and_crawl_all_pages(url: str, username: str, password: str, login_url: str, username_selector: str, password_selector: str, submit_selector: str):
+async def login_and_crawl_all_pages(url: str, username: str, password: str, login_url: str, username_selector: str, password_selector: str, submit_selector: str, additional_urls: list[str] = None):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -413,10 +413,16 @@ async def login_and_crawl_all_pages(url: str, username: str, password: str, logi
                     await crawl(link, depth + 1)
 
         await crawl(url, 0)
+
+        if additional_urls:
+            for additional_url in additional_urls:
+                if additional_url not in visited_urls:
+                    await crawl(additional_url, 0)
+
         await browser.close()
         return url_to_content
 
-async def crawl_all_pages_no_login(start_url: str):
+async def crawl_all_pages_no_login(start_url: str, additional_urls: list[str] = None):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -471,6 +477,12 @@ async def crawl_all_pages_no_login(start_url: str):
                     await crawl(link, depth + 1)
 
         await crawl(start_url, 0)
+
+        if additional_urls:
+            for additional_url in additional_urls:
+                if additional_url not in visited_urls:
+                    await crawl(additional_url, 0)
+
         await browser.close()
         return url_to_content
 
@@ -517,31 +529,25 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
     progress_container = st.container()
     results_container = st.container()
 
+    # Combine all URLs to be crawled
     all_urls_to_crawl = set(specific_urls or [])
     if heuristic_url_map:
         for urls in heuristic_url_map.values():
             all_urls_to_crawl.update(urls)
 
-    if not all_urls_to_crawl:
-        # Fallback to crawling all pages if no specific URLs are provided
-        crawled_content = asyncio.run(
-            login_and_crawl_all_pages(
-                url=login_url, username=username, password=password, login_url=login_url,
-                username_selector=username_selector, password_selector=password_selector, submit_selector=submit_selector,
-            )
+    # Crawl the main site and any additional URLs
+    crawled_content = asyncio.run(
+        login_and_crawl_all_pages(
+            url=login_url,
+            username=username,
+            password=password,
+            login_url=login_url,
+            username_selector=username_selector,
+            password_selector=password_selector,
+            submit_selector=submit_selector,
+            additional_urls=list(all_urls_to_crawl)
         )
-    else:
-        crawled_content = asyncio.run(
-            crawl_specific_urls(
-                urls=list(all_urls_to_crawl),
-                login_url=login_url,
-                username=username,
-                password=password,
-                username_selector=username_selector,
-                password_selector=password_selector,
-                submit_selector=submit_selector
-            )
-        )
+    )
 
     total_evaluations = 0
     for heuristic in prompt_map:
@@ -606,10 +612,7 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
         for urls in heuristic_url_map.values():
             all_urls_to_crawl.update(urls)
 
-    if not all_urls_to_crawl:
-        crawled_content = asyncio.run(crawl_all_pages_no_login(start_url))
-    else:
-        crawled_content = asyncio.run(crawl_specific_urls(list(all_urls_to_crawl), no_login=True))
+    crawled_content = asyncio.run(crawl_all_pages_no_login(start_url, additional_urls=list(all_urls_to_crawl)))
 
     total_evaluations = 0
     for heuristic in prompt_map:
@@ -736,26 +739,29 @@ def main():
                     heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
 
         if st.button("Run Crawl and Evaluate"):
-            specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
-            with st.spinner("Crawling site and evaluating..."):
-                if requires_login:
-                    evaluations = run_crawl_and_evaluate_stream(
-                        start_url, username, password, login_url,
-                        username_selector, password_selector, submit_selector, st.session_state.prompt_map,
-                        specific_urls=specific_urls,
-                        heuristic_url_map=heuristic_url_map
-                    )
-                else:
-                    evaluations = run_crawl_and_evaluate_public(
-                        start_url,
-                        st.session_state.prompt_map,
-                        max_pages_to_evaluate=int(max_pages_to_evaluate),
-                        specific_urls=specific_urls,
-                        heuristic_url_map=heuristic_url_map
-                    )
-                st.session_state["evaluations"] = evaluations
-                st.success("Evaluation complete")
-                st.json(st.session_state["evaluations"])
+            if not st.session_state.prompt_map:
+                st.error("Please upload an Excel file with prompts before running the evaluation.")
+            else:
+                specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
+                with st.spinner("Crawling site and evaluating..."):
+                    if requires_login:
+                        evaluations = run_crawl_and_evaluate_stream(
+                            start_url, username, password, login_url,
+                            username_selector, password_selector, submit_selector, st.session_state.prompt_map,
+                            specific_urls=specific_urls,
+                            heuristic_url_map=heuristic_url_map
+                        )
+                    else:
+                        evaluations = run_crawl_and_evaluate_public(
+                            start_url,
+                            st.session_state.prompt_map,
+                            max_pages_to_evaluate=int(max_pages_to_evaluate),
+                            specific_urls=specific_urls,
+                            heuristic_url_map=heuristic_url_map
+                        )
+                    st.session_state["evaluations"] = evaluations
+                    st.success("Evaluation complete")
+                    st.json(st.session_state["evaluations"])
 
 
         if "evaluations" in st.session_state:
