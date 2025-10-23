@@ -7,6 +7,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+streamlit_output.log
 *.so
 .Python
 build/
