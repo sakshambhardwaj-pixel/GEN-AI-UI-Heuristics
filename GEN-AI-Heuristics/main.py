@@ -3,7 +3,7 @@ import sys
 import json
 from dotenv import load_dotenv
 
-if sys.platform == "win32":
+if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 import pandas as pd
 from playwright.async_api import async_playwright
