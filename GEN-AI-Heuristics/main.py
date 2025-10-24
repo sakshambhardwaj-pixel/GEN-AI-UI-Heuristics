@@ -3,7 +3,7 @@ import sys
 import json
 from dotenv import load_dotenv
 
-if sys.platform.startswith("win"):
+if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 import pandas as pd
 from playwright.async_api import async_playwright
@@ -730,13 +730,13 @@ def main():
         st.session_state.prompt_map = prompt_map
         st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
 
-    if assign_per_heuristic:
-        if "prompt_map" in st.session_state and st.session_state.prompt_map:
-            st.subheader("Assign URLs to Heuristics")
-            for heuristic in st.session_state.prompt_map.keys():
-                urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
-                if urls:
-                    heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
+        if assign_per_heuristic:
+            if "prompt_map" in st.session_state and st.session_state.prompt_map:
+                st.subheader("Assign URLs to Heuristics")
+                for heuristic in st.session_state.prompt_map.keys():
+                    urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
+                    if urls:
+                        heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
 
         if st.button("Run Crawl and Evaluate"):
             if not st.session_state.prompt_map:
@@ -763,10 +763,8 @@ def main():
                     st.success("Evaluation complete")
                     st.json(st.session_state["evaluations"])
 
-
         if "evaluations" in st.session_state:
             st.subheader("Saved Evaluation Output")
-
 
             if st.button("Generate Enhanced Report (HTML)"):
                 with st.spinner("Generating comprehensive HTML report..."):
@@ -789,7 +787,6 @@ def main():
                     
                     st.session_state["html_report"] = html_report
 
-
         if "html_report" in st.session_state and st.session_state["html_report"]:
             col1, col2 = st.columns(2)
             
@@ -809,8 +806,6 @@ def main():
                         file_name="heuristic_evaluation_report.csv",
                         mime="text/csv",
                     )
-
-
     else:
         st.info("Please upload an Excel file to start.")
 
