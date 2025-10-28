@@ -626,8 +626,19 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
         <div class="detailed-assessment">
             <h4>Detailed Assessment</h4>
             <div>{data.get('detailed_assessment', data.get('overall_description', 'No detailed assessment available.'))}</div>
-        </div>
+        </div>"""
+
+        # Add analyzed URLs section early in each heuristic
+        analyzed_urls = data.get('analyzed_urls', [])
+        if analyzed_urls:
+            urls_html = "".join(f"<li><a href='{url}' target='_blank' style='color: #2563eb; text-decoration: none;'>{url}</a></li>" for url in analyzed_urls)
+            html_template += f"""
+        <div class="analyzed-urls" style="background: #f0f9ff; border: 1px solid #bfdbfe; padding: 1.5rem; border-radius: 8px; margin: 1.5rem 0;">
+            <h4 style="color: #1e40af; margin-top: 0;">📊 URLs Analyzed for this Heuristic</h4>
+            <ul style="margin-bottom: 0;">{urls_html}</ul>
+        </div>"""
         
+        html_template += f"""
         <div class="bar-chart-container">
             <div class="bar-axis">{axis_ticks}</div>
             <div class="bar-chart">{bar_rows}</div>
@@ -678,15 +689,6 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
         <div class="methodology">
             <h4>Methodology Notes</h4>
             <p>{data.get('methodology_notes', '')}</p>
-        </div>"""
-
-        analyzed_urls = data.get('analyzed_urls', [])
-        if analyzed_urls:
-            urls_html = "".join(f"<li><a href='{url}' target='_blank'>{url}</a></li>" for url in analyzed_urls)
-            html_template += f"""
-        <div class="analyzed-urls" style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 1.5rem; border-radius: 7px; margin: 2rem 0;">
-            <h4>URLs Analyzed for this Heuristic</h4>
-            <ul>{urls_html}</ul>
         </div>"""
 
         html_template += """</section>"""
