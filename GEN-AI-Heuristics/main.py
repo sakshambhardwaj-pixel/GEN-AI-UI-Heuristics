@@ -288,6 +288,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
             
             try:
                 heuristic_analysis = json.loads(analysis_text)
+                heuristic_analysis["analyzed_urls"] = evaluated_urls
                 final_analysis[heuristic_name] = heuristic_analysis
                 with status_container:
                     st.success(f"✅ {heuristic_name} analyzed successfully")
