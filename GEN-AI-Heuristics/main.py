@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from dotenv import load_dotenv
 import pandas as pd
 from playwright.async_api import async_playwright
@@ -13,6 +14,10 @@ import os
 import time
 from datetime import datetime
 from html_generator import generate_html_from_analysis_json, create_fallback_html_report
+
+# Fix for Windows asyncio subprocess issue with Playwright
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 load_dotenv()
 
