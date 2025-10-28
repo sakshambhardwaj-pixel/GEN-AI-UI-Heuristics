@@ -504,7 +504,7 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
                     <th>Score</th>
                     <th>Grade</th>
                     <th>Performance Level</th>
-                    <th>Pages</th>
+                    <th>Analyzed URLs</th>
                     <th>Confidence</th>
                 </tr>
             </thead>
@@ -521,6 +521,9 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
         performance = data.get('performance_level', 'Fair')
         pages = data.get('pages_evaluated', 0)
         confidence = data.get('confidence_score', 'Medium')
+        analyzed_urls = data.get('analyzed_urls', [])
+
+        urls_html = "".join(f"<li><a href='{url}' target='_blank'>{url}</a></li>" for url in analyzed_urls)
         
         html_template += f"""
                 <tr>
@@ -528,7 +531,7 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
                     <td>{score}/{max_score}</td>
                     <td class="grade-cell grade-{grade}">{grade}</td>
                     <td>{performance}</td>
-                    <td>{pages}</td>
+                    <td><ul>{urls_html}</ul></td>
                     <td><span class="confidence-indicator confidence-{confidence.lower()}">{confidence}</span></td>
                 </tr>"""
 
