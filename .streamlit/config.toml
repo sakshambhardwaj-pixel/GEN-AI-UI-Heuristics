@@ -1,0 +1,38 @@
+[server]
+# Increase timeouts to prevent disconnections
+maxUploadSize = 200
+maxMessageSize = 200
+enableCORS = false
+enableXsrfProtection = true
+headless = false
+runOnSave = false
+allowRunOnSave = false
+
+# Connection settings
+port = 8501
+address = "localhost"
+
+# Client settings to prevent timeouts
+[client]
+toolbarMode = "viewer"
+showErrorDetails = true
+
+# Browser settings
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
+
+# Global settings
+[global]
+developmentMode = false
+logLevel = "info"
+minCachedStateSize = 100
+maxCachedStateSize = 1000
+
+# Theme settings for better UX
+[theme]
+primaryColor = "#FF6B6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
