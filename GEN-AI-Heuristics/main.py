@@ -3,6 +3,8 @@ import sys
 import json
 import sys
 from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -10,7 +12,6 @@ import pandas as pd
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
 import streamlit as st
-from bs4 import BeautifulSoup
 from openai import OpenAI
 from io import BytesIO
 import re
@@ -87,6 +88,32 @@ def fetch_and_map_prompts(uploaded_file):
         if heuristic and prompt:
             mapping[heuristic] = prompt
     return mapping
+
+@st.cache_data
+def fetch_wcag_guidelines():
+    """
+    Fetches WCAG guidelines from the W3C website.
+    Note: This scraper is tightly coupled to the HTML structure of the page and may break if the structure changes.
+    """
+    url = "https://www.w3.org/WAI/WCAG22/quickref/"
+    guidelines = {}
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        for h4 in soup.find_all("h4", id=lambda x: x and x.startswith('qr-')):
+            title = h4.get_text(strip=True).replace("\n", " ").replace("  ", " ")
+            sc_body = h4.find_parent("article").find("div", class_="sc-text")
+            if sc_body:
+                description = sc_body.get_text(strip=True, separator='\n')
+                prompt = f"Evaluate the website against the following WCAG 2.2 Success Criterion:\n\n**{title}**\n\n{description}\n\nPlease provide a detailed analysis of the website's compliance with this criterion. Provide a score from 0-4 (0=fail, 4=exceeds) and justify with examples from the page."
+                guidelines[title] = prompt
+
+        return guidelines
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching WCAG guidelines: {e}")
+        return {}
 
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -678,6 +705,19 @@ def main():
     with st.sidebar:
         st.title("Upload Excel file")
         uploaded_file = st.file_uploader("Upload Heuristic Excel file with AI Prompts sheet", type=["xlsx", "xls"])
+
+        # Add WCAG Guidelines section
+        st.title("WCAG Guidelines")
+        wcag_guidelines = fetch_wcag_guidelines()
+        if wcag_guidelines:
+            with st.expander("Select WCAG Guidelines to Evaluate"):
+                selected_wcag_guidelines = []
+                for guideline in wcag_guidelines.keys():
+                    if st.checkbox(guideline, key=f"wcag_{guideline}"):
+                        selected_wcag_guidelines.append(guideline)
+        else:
+            st.warning("Could not load WCAG guidelines.")
+
         st.title("Target Website")
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
@@ -733,6 +773,13 @@ def main():
 
     if uploaded_file:
         prompt_map = fetch_and_map_prompts(uploaded_file)
+
+        # Combine heuristics from Excel with selected WCAG guidelines
+        if 'selected_wcag_guidelines' in locals() and selected_wcag_guidelines:
+            for guideline in selected_wcag_guidelines:
+                if guideline in wcag_guidelines:
+                    prompt_map[guideline] = wcag_guidelines[guideline]
+
         st.session_state.prompt_map = prompt_map
         st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
 
