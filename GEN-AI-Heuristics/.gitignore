@@ -71,3 +71,5 @@ uploads/
 
 # Docker
 .dockerignore
+wcag.html
+test_scraper.py
