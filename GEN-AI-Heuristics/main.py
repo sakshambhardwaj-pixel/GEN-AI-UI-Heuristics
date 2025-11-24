@@ -709,10 +709,10 @@ def main():
         # Add WCAG Guidelines section
         st.title("WCAG Guidelines")
         wcag_guidelines = fetch_wcag_guidelines()
+        selected_wcag_guidelines = []
         if wcag_guidelines:
             with st.expander("Select WCAG Guidelines to Evaluate"):
                 select_all = st.checkbox("Select All", key="select_all_wcag")
-                selected_wcag_guidelines = []
                 for guideline in wcag_guidelines.keys():
                     if st.checkbox(guideline, value=select_all, key=f"wcag_{guideline}"):
                         selected_wcag_guidelines.append(guideline)
@@ -776,7 +776,7 @@ def main():
         prompt_map = fetch_and_map_prompts(uploaded_file)
 
         # Combine heuristics from Excel with selected WCAG guidelines
-        if 'selected_wcag_guidelines' in locals() and selected_wcag_guidelines:
+        if selected_wcag_guidelines:
             for guideline in selected_wcag_guidelines:
                 if guideline in wcag_guidelines:
                     prompt_map[guideline] = wcag_guidelines[guideline]
