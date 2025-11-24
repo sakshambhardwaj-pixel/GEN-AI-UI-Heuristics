@@ -711,9 +711,10 @@ def main():
         wcag_guidelines = fetch_wcag_guidelines()
         if wcag_guidelines:
             with st.expander("Select WCAG Guidelines to Evaluate"):
+                select_all = st.checkbox("Select All", key="select_all_wcag")
                 selected_wcag_guidelines = []
                 for guideline in wcag_guidelines.keys():
-                    if st.checkbox(guideline, key=f"wcag_{guideline}"):
+                    if st.checkbox(guideline, value=select_all, key=f"wcag_{guideline}"):
                         selected_wcag_guidelines.append(guideline)
         else:
             st.warning("Could not load WCAG guidelines.")
