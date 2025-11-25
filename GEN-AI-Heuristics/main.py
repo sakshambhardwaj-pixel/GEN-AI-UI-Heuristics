@@ -701,10 +701,17 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
 def main():
     st.header("Heuristic Evaluation")
 
-
     with st.sidebar:
-        st.title("Upload Excel file")
-        uploaded_file = st.file_uploader("Upload Heuristic Excel file with AI Prompts sheet", type=["xlsx", "xls"])
+        st.title("Evaluation Source")
+        use_heuristic_sheet = st.toggle("Use UI Heuristic Prompt Sheet", value=True)
+
+        uploaded_file = None
+        if use_heuristic_sheet:
+            uploaded_file = st.file_uploader(
+                "Upload Heuristic Excel file",
+                type=["xlsx", "xls"],
+                help="Upload an Excel file with a sheet named 'AI Prompts' containing heuristics and their corresponding prompts.",
+            )
 
         # Add WCAG Guidelines section
         st.title("WCAG Guidelines")
@@ -722,146 +729,158 @@ def main():
         st.title("Target Website")
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
-        max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=1)
-        specific_urls_input = st.text_area("Enter specific URLs to evaluate (one per line)")
-        
+        max_pages_to_evaluate = st.number_input(
+            "Max pages to evaluate", min_value=1, max_value=100, value=1
+        )
+        specific_urls_input = st.text_area(
+            "Enter specific URLs to evaluate (one per line)"
+        )
+
         # Per-heuristic URL assignment
         assign_per_heuristic = st.checkbox("Assign URLs to specific heuristics")
-        heuristic_url_map = {}
-
-        # FIX: Initialize login_url with a default value
-        login_url = None
-        username = None
-        password = None
-        username_selector = None
-        password_selector = None
-        submit_selector = None
         
+        login_url, username, password = None, None, None
+        username_selector, password_selector, submit_selector = None, None, None
+
         if requires_login:
             login_url = st.text_input("Login URL", value="https://www.saucedemo.com/")
             username = st.text_input("Username", value="standard_user")
-            password = st.text_input("Password", value="secret_sauce", type="password")
-        
+            password = st.text_input(
+                "Password", value="secret_sauce", type="password"
+            )
             username_selector = st.text_input(
-                "Username Selector", 
+                "Username Selector",
                 value="#user-name",
                 help="CSS selector for the username input field. Right-click on the username field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #username, .username-field, input[name='username']"
             )
-            
             password_selector = st.text_input(
-                "Password Selector", 
+                "Password Selector",
                 value="#password",
                 help="CSS selector for the password input field. Right-click on the password field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #password, .password-field, input[type='password']"
             )
-            
             submit_selector = st.text_input(
-                "Submit Button Selector", 
+                "Submit Button Selector",
                 value="#login-button",
                 help="CSS selector for the login/submit button. Right-click on the login button, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #login-btn, .submit-button, button[type='submit']"
             )
         else:
-            # For public sites: show site URL input when login not required
-            start_url = st.text_input("Site URL", value="https://www.saucedemo.com/", help="Enter the public site URL to crawl")
+            start_url = st.text_input(
+                "Site URL",
+                value="https://www.saucedemo.com/",
+                help="Enter the public site URL to crawl",
+            )
 
-        
-        # Refresh button
         st.markdown("---")
         if st.button("🔄 Refresh", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
+    # --- Main Panel ---
+    prompt_map = {}
+    heuristic_url_map = {}
 
-    if uploaded_file:
-        prompt_map = fetch_and_map_prompts(uploaded_file)
+    if use_heuristic_sheet:
+        if uploaded_file:
+            prompt_map.update(fetch_and_map_prompts(uploaded_file))
+        else:
+            st.info("Please upload a UI Heuristics Excel file to proceed, or toggle off the option in the sidebar.")
+            return
 
-        # Combine heuristics from Excel with selected WCAG guidelines
-        if selected_wcag_guidelines:
-            for guideline in selected_wcag_guidelines:
-                if guideline in wcag_guidelines:
-                    prompt_map[guideline] = wcag_guidelines[guideline]
+    if selected_wcag_guidelines:
+        for guideline in selected_wcag_guidelines:
+            if guideline in wcag_guidelines:
+                prompt_map[guideline] = wcag_guidelines[guideline]
 
-        st.session_state.prompt_map = prompt_map
-        st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
+    if not prompt_map:
+        st.info("Please select at least one WCAG guideline or upload a heuristic sheet to begin.")
+        return
 
-        if assign_per_heuristic:
-            if "prompt_map" in st.session_state and st.session_state.prompt_map:
-                st.subheader("Assign URLs to Heuristics")
-                for heuristic in st.session_state.prompt_map.keys():
-                    urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
-                    if urls:
-                        heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
+    st.session_state.prompt_map = prompt_map
+    st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
 
-        if st.button("Run Crawl and Evaluate"):
-            if not st.session_state.prompt_map:
-                st.error("Please upload an Excel file with prompts before running the evaluation.")
-            else:
-                specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
-                with st.spinner("Crawling site and evaluating..."):
-                    if requires_login:
-                        evaluations = run_crawl_and_evaluate_stream(
-                            start_url, username, password, login_url,
-                            username_selector, password_selector, submit_selector, st.session_state.prompt_map,
-                            specific_urls=specific_urls,
-                            heuristic_url_map=heuristic_url_map
-                        )
-                    else:
-                        evaluations = run_crawl_and_evaluate_public(
-                            start_url,
-                            st.session_state.prompt_map,
-                            max_pages_to_evaluate=int(max_pages_to_evaluate),
-                            specific_urls=specific_urls,
-                            heuristic_url_map=heuristic_url_map
-                        )
-                    st.session_state["evaluations"] = evaluations
-                    st.success("Evaluation complete")
-                    st.json(st.session_state["evaluations"])
+    if assign_per_heuristic:
+        st.subheader("Assign URLs to Heuristics")
+        for heuristic in st.session_state.prompt_map.keys():
+            urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
+            if urls:
+                heuristic_url_map[heuristic] = [
+                    url.strip() for url in urls.split("\n") if url.strip()
+                ]
 
-        if "evaluations" in st.session_state:
-            st.subheader("Saved Evaluation Output")
-
-            if st.button("Generate Enhanced Report (HTML)"):
-                with st.spinner("Generating comprehensive HTML report..."):
-                    analysis_json = analyze_each_heuristic_individually_for_report(st.session_state["evaluations"])
-                    st.session_state["analysis_json"] = analysis_json
-                    
-                    if not analysis_json:
-                        st.error("Failed to generate analysis. Please try again.")
-                        return
-                    
-                    # FIX: Use login_url if available, otherwise use start_url
-                    url_to_parse = login_url if (requires_login and login_url) else start_url
-                    site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0]
-                    
-                    html_report = generate_html_from_analysis_json(
-                        analysis_json, 
-                        site_name=site_name,
-                        site_description="Comprehensive UX Heuristic Analysis"
-                    )
-                    
-                    st.session_state["html_report"] = html_report
-
-        if "html_report" in st.session_state and st.session_state["html_report"]:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.download_button(
-                    label="📄 Download Enhanced HTML Report",
-                    data=st.session_state["html_report"],
-                    file_name="enhanced_heuristic_evaluation_report.html",
-                    mime="text/html",
+    if st.button("Run Crawl and Evaluate"):
+        specific_urls = [
+            url.strip() for url in specific_urls_input.split("\n") if url.strip()
+        ]
+        with st.spinner("Crawling site and evaluating..."):
+            if requires_login:
+                evaluations = run_crawl_and_evaluate_stream(
+                    start_url,
+                    username,
+                    password,
+                    login_url,
+                    username_selector,
+                    password_selector,
+                    submit_selector,
+                    st.session_state.prompt_map,
+                    specific_urls=specific_urls,
+                    heuristic_url_map=heuristic_url_map,
                 )
-            with col2:
-                if "analysis_json" in st.session_state:
-                    csv_data = convert_analysis_to_csv(st.session_state["analysis_json"])
-                    st.download_button(
-                        label="📄 Download CSV Report",
-                        data=csv_data,
-                        file_name="heuristic_evaluation_report.csv",
-                        mime="text/csv",
-                    )
-    else:
-        st.info("Please upload an Excel file to start.")
+            else:
+                evaluations = run_crawl_and_evaluate_public(
+                    start_url,
+                    st.session_state.prompt_map,
+                    max_pages_to_evaluate=int(max_pages_to_evaluate),
+                    specific_urls=specific_urls,
+                    heuristic_url_map=heuristic_url_map,
+                )
+            st.session_state["evaluations"] = evaluations
+            st.success("Evaluation complete")
+            st.json(st.session_state["evaluations"])
+
+    if "evaluations" in st.session_state:
+        st.subheader("Saved Evaluation Output")
+
+        if st.button("Generate Enhanced Report (HTML)"):
+            with st.spinner("Generating comprehensive HTML report..."):
+                analysis_json = analyze_each_heuristic_individually_for_report(
+                    st.session_state["evaluations"]
+                )
+                st.session_state["analysis_json"] = analysis_json
+
+                if not analysis_json:
+                    st.error("Failed to generate analysis. Please try again.")
+                    return
+
+                url_to_parse = login_url if (requires_login and login_url) else start_url
+                site_name = (
+                    url_to_parse.replace("https://", "").replace("http://", "").split("/")[0]
+                )
+                html_report = generate_html_from_analysis_json(
+                    analysis_json,
+                    site_name=site_name,
+                    site_description="Comprehensive UX Heuristic Analysis",
+                )
+                st.session_state["html_report"] = html_report
+
+    if "html_report" in st.session_state and st.session_state["html_report"]:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="📄 Download Enhanced HTML Report",
+                data=st.session_state["html_report"],
+                file_name="enhanced_heuristic_evaluation_report.html",
+                mime="text/html",
+            )
+        with col2:
+            if "analysis_json" in st.session_state:
+                csv_data = convert_analysis_to_csv(st.session_state["analysis_json"])
+                st.download_button(
+                    label="📄 Download CSV Report",
+                    data=csv_data,
+                    file_name="heuristic_evaluation_report.csv",
+                    mime="text/csv",
+                )
 
 
 
