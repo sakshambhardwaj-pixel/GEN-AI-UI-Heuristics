@@ -1,0 +1,81 @@
+# Optimized Dockerfile for Podman - GEN-AI-UI-Heuristics Streamlit Application
+FROM python:3.11-slim
+
+LABEL maintainer="Heuristic Evaluation Team" \
+      version="1.0.0" \
+      description="Heuristic Evaluation Streamlit App for Podman"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies required for Playwright and general operations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    gnupg \
+    ca-certificates \
+    fonts-liberation \
+    libasound2 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libxss1 \
+    libu2f-udev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/data /app/browsers
+
+# Copy requirements and install Python dependencies
+COPY GEN-AI-Heuristics/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright and Chromium browser
+RUN pip install playwright==1.55.0 && \
+    playwright install chromium && \
+    playwright install-deps chromium
+
+# Copy all application files
+COPY GEN-AI-Heuristics/main.py ./
+COPY GEN-AI-Heuristics/html_generator.py ./
+COPY GEN-AI-Heuristics/sample_heuristics.xlsx ./
+COPY GEN-AI-Heuristics/pyproject.toml ./
+
+# Copy environment file if it exists (optional)
+COPY GEN-AI-Heuristics/.env* ./ 2>/dev/null || true
+
+# Set proper permissions
+RUN chmod +x main.py && \
+    chmod 755 /app && \
+    chmod -R 755 /app/uploads /app/data
+
+# Expose Streamlit port
+EXPOSE 8501
+
+# Set environment variables for Streamlit
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_HEADLESS=true
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV STREAMLIT_LOGGER_LEVEL=info
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/browsers
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+
+# Create a non-root user for security
+RUN useradd --create-home --shell /bin/bash app && \
+    chown -R app:app /app
+USER app
+
+# Set the entrypoint and command
+ENTRYPOINT ["streamlit", "run"]
+CMD ["main.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

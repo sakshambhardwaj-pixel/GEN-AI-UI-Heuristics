@@ -1,0 +1,85 @@
+# Podman YAML file for GEN-AI-UI-Heuristics Streamlit Application
+# Use with: podman play kube podman-compose.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: heuristic-evaluation-app
+  labels:
+    app: heuristic-evaluation
+    version: "1.0.0"
+spec:
+  restartPolicy: Unless-failed
+  containers:
+  - name: streamlit-app
+    image: localhost/heuristic-evaluation:latest
+    ports:
+    - containerPort: 8501
+      hostPort: 8501
+      protocol: TCP
+    env:
+    - name: STREAMLIT_SERVER_PORT
+      value: "8501"
+    - name: STREAMLIT_SERVER_ADDRESS
+      value: "0.0.0.0"
+    - name: STREAMLIT_SERVER_HEADLESS
+      value: "true"
+    - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+      value: "false"
+    - name: OPENAI_API_KEY
+      value: "${OPENAI_API_KEY}"
+    - name: PLAYWRIGHT_BROWSERS_PATH
+      value: "/app/browsers"
+    volumeMounts:
+    - name: app-uploads
+      mountPath: /app/uploads
+    - name: app-data
+      mountPath: /app/data
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+    livenessProbe:
+      httpGet:
+        path: /_stcore/health
+        port: 8501
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 3
+    readinessProbe:
+      httpGet:
+        path: /_stcore/health
+        port: 8501
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+  volumes:
+  - name: app-uploads
+    hostPath:
+      path: ./uploads
+      type: DirectoryOrCreate
+  - name: app-data
+    hostPath:
+      path: ./data
+      type: DirectoryOrCreate
+
+---
+# Service for external access (optional - Podman will handle port mapping)
+apiVersion: v1
+kind: Service
+metadata:
+  name: heuristic-evaluation-service
+  labels:
+    app: heuristic-evaluation
+spec:
+  ports:
+  - port: 8501
+    targetPort: 8501
+    protocol: TCP
+    name: streamlit
+  selector:
+    app: heuristic-evaluation
+  type: NodePort

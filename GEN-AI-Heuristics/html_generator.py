@@ -6,6 +6,101 @@ Contains all HTML templates, CSS styles, and content generation functions.
 from datetime import datetime
 import streamlit as st
 
+
+def generate_metrics_section_html(metrics_summary: dict) -> str:
+    """Generate HTML for execution metrics section.
+    
+    Args:
+        metrics_summary: Dictionary containing metrics data from MetricsTracker.get_summary()
+        
+    Returns:
+        HTML string for the metrics section
+    """
+    if not metrics_summary:
+        return ""
+    
+    elapsed_time = metrics_summary.get("elapsed_time", "00:00:00")
+    pages_crawled = metrics_summary.get("pages_crawled", 0)
+    pages_requested = metrics_summary.get("pages_requested", 0)
+    pages_skipped = metrics_summary.get("pages_skipped", 0)
+    total_input_tokens = metrics_summary.get("total_input_tokens", 0)
+    total_output_tokens = metrics_summary.get("total_output_tokens", 0)
+    total_tokens = metrics_summary.get("total_tokens", 0)
+    api_calls = metrics_summary.get("api_calls", 0)
+    estimated_cost = metrics_summary.get("estimated_cost_usd", 0)
+    cost_per_page = metrics_summary.get("cost_per_page", 0)
+    skip_reasons = metrics_summary.get("skip_reasons", {})
+    model_used = metrics_summary.get("model_used", "gpt-4o-mini")
+    
+    # Generate skip reasons HTML if any
+    skip_reasons_html = ""
+    if pages_skipped > 0 and skip_reasons:
+        skip_reasons_html = """
+        <div style="margin-top: 1.5rem; background: #fef3c7; border-left: 4px solid #f59e0b; padding: 1rem; border-radius: 8px;">
+            <h4 style="color: #92400e; margin-top: 0;">⚠️ Pages Skipped Summary</h4>
+            <ul style="margin: 0; padding-left: 1.5rem;">"""
+        
+        for reason, urls in skip_reasons.items():
+            skip_reasons_html += f"<li><strong>{reason}:</strong> {len(urls)} pages</li>"
+        
+        skip_reasons_html += """
+            </ul>
+        </div>"""
+    
+    metrics_html = f"""
+    <section style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); border-radius: 12px; padding: 2rem; margin-bottom: 2rem; border: 1px solid #bae6fd;">
+        <h2 style="color: #0369a1; margin-top: 0;">📊 Execution Metrics</h2>
+        <div style="background: white; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; display: inline-block;">
+            <strong>Model Used:</strong> <span style="color: #0369a1; font-family: monospace;">{model_used}</span>
+        </div>
+        
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0;">
+            <div style="background: white; padding: 1.25rem; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                <div style="font-size: 1.75rem; font-weight: bold; color: #0369a1;">⏱️ {elapsed_time}</div>
+                <div style="font-size: 0.9rem; color: #64748b;">Elapsed Time</div>
+            </div>
+            <div style="background: white; padding: 1.25rem; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                <div style="font-size: 1.75rem; font-weight: bold; color: #059669;">{pages_crawled}/{pages_requested}</div>
+                <div style="font-size: 0.9rem; color: #64748b;">Pages Crawled</div>
+            </div>
+            <div style="background: white; padding: 1.25rem; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                <div style="font-size: 1.75rem; font-weight: bold; color: #7c3aed;">{total_tokens:,}</div>
+                <div style="font-size: 0.9rem; color: #64748b;">Total Tokens</div>
+            </div>
+            <div style="background: white; padding: 1.25rem; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                <div style="font-size: 1.75rem; font-weight: bold; color: #dc2626;">${estimated_cost:.4f}</div>
+                <div style="font-size: 0.9rem; color: #64748b;">Estimated Cost</div>
+            </div>
+        </div>
+        
+        <div style="background: white; padding: 1.25rem; border-radius: 8px; margin-top: 1rem;">
+            <h4 style="color: #374151; margin-top: 0;">Token Breakdown</h4>
+            <table style="width: 100%; border-collapse: collapse;">
+                <tr>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;"><strong>Input Tokens:</strong></td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; text-align: right;">{total_input_tokens:,}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;"><strong>Output Tokens:</strong></td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; text-align: right;">{total_output_tokens:,}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;"><strong>API Calls:</strong></td>
+                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; text-align: right;">{api_calls}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 0.5rem;"><strong>Cost per Page:</strong></td>
+                    <td style="padding: 0.5rem; text-align: right;">${cost_per_page:.4f}</td>
+                </tr>
+            </table>
+        </div>
+        
+        {skip_reasons_html}
+    </section>
+    """
+    
+    return metrics_html
+
 def generate_overall_assessment_text(analysis_json: dict, average_score: float, performance_level: str, overall_grade: str) -> str:
     """Generate comprehensive overall assessment text focused on strengths, improvements, and issues"""
     
@@ -220,8 +315,18 @@ def generate_conclusion_content(analysis_json: dict, average_score: float, max_s
     
     return conclusion_content
 
-def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Website", site_description: str = "UX Heuristic Analysis") -> str:
-    """Generate enhanced HTML report with comprehensive overall assessment"""
+def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Website", site_description: str = "UX Heuristic Analysis", metrics_summary: dict = None) -> str:
+    """Generate enhanced HTML report with comprehensive overall assessment
+    
+    Args:
+        analysis_json: Dictionary containing heuristic analysis data
+        site_name: Name of the evaluated site
+        site_description: Description for the report
+        metrics_summary: Optional dictionary containing execution metrics from MetricsTracker
+        
+    Returns:
+        Complete HTML report as a string
+    """
     
     if analysis_json is None:
         st.error("Analysis data is not available. Please try running the evaluation again.")
@@ -469,6 +574,8 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
         {overall_assessment_content}
     </section>
 
+    {generate_metrics_section_html(metrics_summary) if metrics_summary else ''}
+
     <section class="instructions">
         <h3>📋 How to Use This Report</h3>
         <p><strong>This comprehensive heuristic evaluation report provides actionable insights to improve your website's user experience.</strong></p>
@@ -504,7 +611,7 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
                     <th>Score</th>
                     <th>Grade</th>
                     <th>Performance Level</th>
-                    <th>Analyzed URLs</th>
+                    <th>Pages Evaluated</th>
                     <th>Confidence</th>
                 </tr>
             </thead>
@@ -521,9 +628,6 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
         performance = data.get('performance_level', 'Fair')
         pages = data.get('pages_evaluated', 0)
         confidence = data.get('confidence_score', 'Medium')
-        analyzed_urls = data.get('analyzed_urls', [])
-
-        urls_html = "".join(f"<li><a href='{url}' target='_blank'>{url}</a></li>" for url in analyzed_urls)
         
         html_template += f"""
                 <tr>
@@ -531,7 +635,7 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
                     <td>{score}/{max_score}</td>
                     <td class="grade-cell grade-{grade}">{grade}</td>
                     <td>{performance}</td>
-                    <td><ul>{urls_html}</ul></td>
+                    <td>{pages}</td>
                     <td><span class="confidence-indicator confidence-{confidence.lower()}">{confidence}</span></td>
                 </tr>"""
 
@@ -628,15 +732,8 @@ def generate_html_from_analysis_json(analysis_json: dict, site_name: str = "Webs
             <div>{data.get('detailed_assessment', data.get('overall_description', 'No detailed assessment available.'))}</div>
         </div>"""
 
-        # Add analyzed URLs section early in each heuristic
-        analyzed_urls = data.get('analyzed_urls', [])
-        if analyzed_urls:
-            urls_html = "".join(f"<li><a href='{url}' target='_blank' style='color: #2563eb; text-decoration: none;'>{url}</a></li>" for url in analyzed_urls)
-            html_template += f"""
-        <div class="analyzed-urls" style="background: #f0f9ff; border: 1px solid #bfdbfe; padding: 1.5rem; border-radius: 8px; margin: 1.5rem 0;">
-            <h4 style="color: #1e40af; margin-top: 0;">📊 URLs Analyzed for this Heuristic</h4>
-            <ul style="margin-bottom: 0;">{urls_html}</ul>
-        </div>"""
+        # NOTE: Analyzed URLs are intentionally excluded from client-facing report
+        # They are available in the internal Excel report instead
         
         html_template += f"""
         <div class="bar-chart-container">

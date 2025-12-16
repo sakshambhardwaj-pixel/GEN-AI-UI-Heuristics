@@ -19,6 +19,8 @@ import os
 import time
 from datetime import datetime
 from html_generator import generate_html_from_analysis_json, create_fallback_html_report
+from metrics_tracker import MetricsTracker
+from internal_report import InternalReportGenerator
 
 # Fix for Windows asyncio subprocess issue with Playwright
 if sys.platform.startswith("win"):
@@ -27,8 +29,8 @@ if sys.platform.startswith("win"):
 load_dotenv()
 
 
-def convert_analysis_to_csv(analysis_json):
-    """Converts the analysis JSON to a CSV string."""
+def convert_analysis_to_csv(analysis_json, metrics_summary=None):
+    """Converts the analysis JSON to a CSV string with optional metrics data."""
     if not analysis_json:
         return ""
 
@@ -50,6 +52,15 @@ def convert_analysis_to_csv(analysis_json):
             "Methodology Notes": data.get("methodology_notes", ""),
             "Confidence Score": data.get("confidence_score", ""),
         }
+        
+        # Add metrics columns if available
+        if metrics_summary:
+            record["Model Used"] = metrics_summary.get("model_used", "")
+            record["Elapsed Time"] = metrics_summary.get("elapsed_time", "")
+            record["Pages Crawled"] = metrics_summary.get("pages_crawled", "")
+            record["Pages Requested"] = metrics_summary.get("pages_requested", "")
+            record["Total Tokens"] = metrics_summary.get("total_tokens", "")
+            record["Estimated Cost USD"] = metrics_summary.get("estimated_cost_usd", "")
 
         for i, subtopic in enumerate(data.get("subtopics", [])):
             record[f"Subtopic {i+1} Name"] = subtopic.get("name", "")
@@ -71,6 +82,7 @@ def convert_analysis_to_csv(analysis_json):
     df = pd.DataFrame(records)
     return df.to_csv(index=False).encode('utf-8')
 
+
 def fetch_and_map_prompts(uploaded_file):
     if uploaded_file is None:
         st.warning("Please upload an Excel file to proceed.")
@@ -88,6 +100,7 @@ def fetch_and_map_prompts(uploaded_file):
         if heuristic and prompt:
             mapping[heuristic] = prompt
     return mapping
+
 
 @st.cache_data
 def fetch_wcag_guidelines():
@@ -115,6 +128,7 @@ def fetch_wcag_guidelines():
         st.error(f"Error fetching WCAG guidelines: {e}")
         return {}
 
+
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     for script in soup(["script", "style"]):
@@ -122,6 +136,7 @@ def clean_html_content(html_content):
     text = soup.get_text(separator=' ')
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
 
 def format_llm_response(response: str) -> str:
     """Format LLM response from OpenAI ChatCompletion object or string for better viewing"""
@@ -149,14 +164,22 @@ def format_llm_response(response: str) -> str:
     text = text.strip() + '\n' + '='*60 + '\n'
     return text
 
-def evaluate_heuristic_with_llm(prompt: str, page_content: str) -> str:
-    """Evaluate heuristics using OpenAI's API"""
+
+def evaluate_heuristic_with_llm(prompt: str, page_content: str, metrics: MetricsTracker = None, model: str = "gpt-4o-mini") -> str:
+    """Evaluate heuristics using OpenAI's API with token tracking and model selection"""
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
     full_prompt = f"{prompt}\n\nPage Content:\n{page_content}"
     
+    # Map model names to actual API model identifiers
+    model_mapping = {
+        "gpt-4o": "gpt-4o-2024-08-06",
+        "gpt-4o-mini": "gpt-4o-mini-2024-07-18"
+    }
+    api_model = model_mapping.get(model, "gpt-4o-mini-2024-07-18")
+    
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=api_model,
             messages=[
                 {
                     "role": "system", 
@@ -173,6 +196,13 @@ def evaluate_heuristic_with_llm(prompt: str, page_content: str) -> str:
             max_tokens=4000
         )
         
+        # Track token usage from response
+        if metrics and response.usage:
+            metrics.record_api_call(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens
+            )
+        
         output = response
         summary = format_llm_response(output)
         return summary
@@ -181,9 +211,17 @@ def evaluate_heuristic_with_llm(prompt: str, page_content: str) -> str:
         print(f"Error calling OpenAI API: {e}")
         return f"Error: {str(e)}"
 
-def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
+
+def analyze_each_heuristic_individually_for_report(evaluations: dict, metrics: MetricsTracker = None, model: str = "gpt-4o-mini") -> dict:
     """Analyze each heuristic individually to prevent crashes with large data"""
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    
+    # Map model names to actual API model identifiers
+    model_mapping = {
+        "gpt-4o": "gpt-4o-2024-08-06",
+        "gpt-4o-mini": "gpt-4o-mini-2024-07-18"
+    }
+    api_model = model_mapping.get(model, "gpt-4o-mini-2024-07-18")
     
     final_analysis = {}
     heuristic_names = list(evaluations.keys())
@@ -273,7 +311,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
         
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model=api_model,
                 messages=[
                     {
                         "role": "system",
@@ -295,6 +333,13 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
                 temperature=0.3,
                 max_tokens=3500
             )
+            
+            # Track token usage from response
+            if metrics and response.usage:
+                metrics.record_api_call(
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens
+                )
             
             analysis_text = response.choices[0].message.content.strip()
             
@@ -339,6 +384,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict) -> dict:
     
     return final_analysis
 
+
 def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -> dict:
     """Create fallback analysis for a specific heuristic"""
     return {
@@ -379,7 +425,92 @@ def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -
         "confidence_score": "Low"
     }
 
-async def login_and_crawl_all_pages(url: str, username: str, password: str, login_url: str, username_selector: str, password_selector: str, submit_selector: str, additional_urls: list[str] = None):
+
+async def navigate_authenticated_site(
+    page,
+    login_url: str,
+    start_url: str,
+    username: str,
+    password: str,
+    username_selector: str,
+    password_selector: str,
+    submit_selector: str,
+    metrics: MetricsTracker = None
+) -> tuple[bool, str]:
+    """
+    Navigate authenticated sites with improved post-login discovery.
+    
+    Args:
+        page: Playwright page object
+        login_url: URL of the login page
+        start_url: URL to start crawling from (may be same as login_url)
+        username: Login username
+        password: Login password
+        username_selector: CSS selector for username field
+        password_selector: CSS selector for password field
+        submit_selector: CSS selector for submit button
+        metrics: MetricsTracker instance for logging
+        
+    Returns:
+        Tuple of (success: bool, landing_page_url: str)
+    """
+    try:
+        # Step 1: Navigate to login page
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=120000)
+        
+        # Step 2: Perform login
+        await page.fill(username_selector, username)
+        await page.fill(password_selector, password)
+        await page.click(submit_selector)
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        
+        # Step 3: Capture post-login URL (landing page)
+        post_login_url = page.url
+        
+        # Step 4: Verify we're not still on login page
+        if post_login_url == login_url:
+            # Check for error messages
+            error_selectors = [".error", ".alert-danger", "[role='alert']", ".login-error", ".error-message"]
+            for selector in error_selectors:
+                error_elem = await page.query_selector(selector)
+                if error_elem:
+                    error_text = await error_elem.text_content()
+                    if metrics:
+                        metrics.record_page_skipped(login_url, f"login_failed: {error_text[:50]}")
+                    print(f"Login failed with error: {error_text}")
+                    return False, login_url
+            
+            if metrics:
+                metrics.record_page_skipped(login_url, "login_failed_no_redirect")
+            print("Login failed: No redirect from login page")
+            return False, login_url
+        
+        # Step 5: Log successful navigation
+        print(f"Successfully authenticated. Landing page: {post_login_url}")
+        
+        # Step 6: If start_url differs from login_url, navigate there
+        if start_url and start_url != login_url and start_url != post_login_url:
+            try:
+                await page.goto(start_url, wait_until="domcontentloaded", timeout=120000)
+                print(f"Navigated to start URL: {start_url}")
+                return True, start_url
+            except Exception as e:
+                # Fall back to post-login landing page
+                if metrics:
+                    metrics.record_page_skipped(start_url, f"navigation_error: {str(e)[:50]}")
+                print(f"Failed to navigate to start URL, using landing page: {post_login_url}")
+                return True, post_login_url
+        
+        return True, post_login_url
+        
+    except Exception as e:
+        if metrics:
+            metrics.record_page_skipped(login_url, f"auth_error: {str(e)[:50]}")
+        print(f"Authentication error: {str(e)}")
+        return False, login_url
+
+
+async def login_and_crawl_all_pages(url: str, username: str, password: str, login_url: str, username_selector: str, password_selector: str, submit_selector: str, additional_urls: list[str] = None, max_pages: int = 50, metrics: MetricsTracker = None):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -398,64 +529,116 @@ async def login_and_crawl_all_pages(url: str, username: str, password: str, logi
 
         visited_urls = set()
         url_to_content = {}
-        max_pages = 50
         max_depth = 2
 
-        # Login flow with more lenient waits
-        try:
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=120000)
-            await page.fill(username_selector, username)
-            await page.fill(password_selector, password)
-            await page.click(submit_selector)
-            await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(500)
-        except Exception as e:
-            print(f"Login navigation error: {e}")
+        # Use enhanced authentication navigation
+        success, landing_page = await navigate_authenticated_site(
+            page=page,
+            login_url=login_url,
+            start_url=url,
+            username=username,
+            password=password,
+            username_selector=username_selector,
+            password_selector=password_selector,
+            submit_selector=submit_selector,
+            metrics=metrics
+        )
+        
+        if not success:
+            print("Failed to authenticate. Aborting crawl.")
+            await browser.close()
+            return {}
 
         base_domain = urlparse(login_url).netloc
 
+        # Process prescriptive URLs first (prioritize them)
+        prescriptive_urls = list(additional_urls) if additional_urls else []
+        
+        # If no prescriptive URLs provided, start from landing page
+        if not prescriptive_urls and landing_page != login_url:
+            print(f"No prescriptive URLs provided. Starting crawl from landing page: {landing_page}")
+            prescriptive_urls = [landing_page]
+
         async def crawl(current_url, depth):
-            if current_url in visited_urls or len(visited_urls) >= max_pages or depth > max_depth:
+            # Check max pages limit FIRST
+            if len(url_to_content) >= max_pages:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "max_limit_reached")
                 return
+            
+            # Check duplicate
+            if current_url in visited_urls:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "duplicate")
+                return
+            
+            # Check depth
+            if depth > max_depth:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "max_depth_exceeded")
+                return
+            
+            # Check domain
+            link_domain = urlparse(current_url).netloc
+            if link_domain != base_domain:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "domain_mismatch")
+                return
+            
             visited_urls.add(current_url)
+            
             try:
                 await page.goto(current_url, wait_until="domcontentloaded", timeout=120000)
                 await page.wait_for_timeout(300)
             except Exception as e:
                 print(f"Timeout or navigation error for {current_url}: {e}")
+                if metrics:
+                    metrics.record_page_skipped(current_url, f"navigation_error: {str(e)[:50]}")
                 return
 
             try:
                 content = await page.content()
                 cleaned_content = clean_html_content(content)
                 url_to_content[current_url] = cleaned_content
+                if metrics:
+                    metrics.record_page_crawled(current_url)
                 print(f"Crawled {current_url} with cleaned content length {len(cleaned_content)}")
             except Exception as e:
                 print(f"Content extraction error at {current_url}: {e}")
+                if metrics:
+                    metrics.record_page_skipped(current_url, f"content_error: {str(e)[:50]}")
                 return
 
-            try:
-                links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-            except Exception as e:
-                print(f"Link extraction error at {current_url}: {e}")
-                return
+            # Only discover more links if under limit
+            if len(url_to_content) < max_pages:
+                try:
+                    links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+                except Exception as e:
+                    print(f"Link extraction error at {current_url}: {e}")
+                    return
 
-            for link in links:
-                link_domain = urlparse(link).netloc
-                if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
-                    await crawl(link, depth + 1)
+                for link in links:
+                    if len(url_to_content) >= max_pages:
+                        break
+                    link_domain = urlparse(link).netloc
+                    if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
+                        await crawl(link, depth + 1)
 
-        await crawl(url, 0)
+        # Crawl prescriptive URLs first (prioritize them)
+        for prescriptive_url in prescriptive_urls:
+            if len(url_to_content) >= max_pages:
+                break
+            await crawl(prescriptive_url, 0)
 
-        if additional_urls:
-            for additional_url in additional_urls:
-                if additional_url not in visited_urls:
-                    await crawl(additional_url, 0)
+        # Then crawl the main URL and discover more pages
+        if len(url_to_content) < max_pages:
+            await crawl(url, 0)
 
         await browser.close()
         return url_to_content
 
-async def crawl_all_pages_no_login(start_url: str, additional_urls: list[str] = None):
+
+async def crawl_all_pages_no_login(start_url: str, additional_urls: list[str] = None, max_pages: int = 50, metrics: MetricsTracker = None):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -475,46 +658,85 @@ async def crawl_all_pages_no_login(start_url: str, additional_urls: list[str] = 
         visited_urls = set()
         url_to_content = {}
         base_domain = urlparse(start_url).netloc
-        max_pages = 50
         max_depth = 2
 
+        # Process prescriptive URLs first (prioritize them)
+        prescriptive_urls = list(additional_urls) if additional_urls else []
+
         async def crawl(current_url, depth):
-            if current_url in visited_urls or len(visited_urls) >= max_pages or depth > max_depth:
+            # Check max pages limit FIRST
+            if len(url_to_content) >= max_pages:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "max_limit_reached")
                 return
+            
+            # Check duplicate
+            if current_url in visited_urls:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "duplicate")
+                return
+            
+            # Check depth
+            if depth > max_depth:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "max_depth_exceeded")
+                return
+            
+            # Check domain
+            link_domain = urlparse(current_url).netloc
+            if link_domain != base_domain:
+                if metrics:
+                    metrics.record_page_skipped(current_url, "domain_mismatch")
+                return
+            
             visited_urls.add(current_url)
+            
             try:
                 await page.goto(current_url, wait_until="domcontentloaded", timeout=120000)
                 await page.wait_for_timeout(300)
             except Exception as e:
                 print(f"Timeout or navigation error for {current_url}: {e}")
+                if metrics:
+                    metrics.record_page_skipped(current_url, f"navigation_error: {str(e)[:50]}")
                 return
 
             try:
                 content = await page.content()
                 cleaned_content = clean_html_content(content)
                 url_to_content[current_url] = cleaned_content
+                if metrics:
+                    metrics.record_page_crawled(current_url)
                 print(f"Crawled {current_url} with cleaned content length {len(cleaned_content)}")
             except Exception as e:
                 print(f"Content extraction error at {current_url}: {e}")
+                if metrics:
+                    metrics.record_page_skipped(current_url, f"content_error: {str(e)[:50]}")
                 return
 
-            try:
-                links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-            except Exception as e:
-                print(f"Link extraction error at {current_url}: {e}")
-                return
+            # Only discover more links if under limit
+            if len(url_to_content) < max_pages:
+                try:
+                    links = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+                except Exception as e:
+                    print(f"Link extraction error at {current_url}: {e}")
+                    return
 
-            for link in links:
-                link_domain = urlparse(link).netloc
-                if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
-                    await crawl(link, depth + 1)
+                for link in links:
+                    if len(url_to_content) >= max_pages:
+                        break
+                    link_domain = urlparse(link).netloc
+                    if link_domain == base_domain and not link.startswith(("mailto:", "javascript:")):
+                        await crawl(link, depth + 1)
 
-        await crawl(start_url, 0)
+        # Crawl prescriptive URLs first (prioritize them)
+        for prescriptive_url in prescriptive_urls:
+            if len(url_to_content) >= max_pages:
+                break
+            await crawl(prescriptive_url, 0)
 
-        if additional_urls:
-            for additional_url in additional_urls:
-                if additional_url not in visited_urls:
-                    await crawl(additional_url, 0)
+        # Then crawl the main URL and discover more pages
+        if len(url_to_content) < max_pages:
+            await crawl(start_url, 0)
 
         await browser.close()
         return url_to_content
@@ -554,13 +776,16 @@ async def crawl_specific_urls(urls: list[str], login_url: str = None, username: 
         return url_to_content
 
 
-def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map, specific_urls=None, heuristic_url_map=None):
+def run_crawl_and_evaluate_stream(start_url, username, password, login_url, username_selector, password_selector, submit_selector, prompt_map, specific_urls=None, heuristic_url_map=None, max_pages: int = 50, metrics: MetricsTracker = None, model: str = "gpt-4o-mini"):
     evaluations = {}
 
     # Create containers for live updates
     st.subheader("📊 Live Evaluation Progress")
     progress_container = st.container()
     results_container = st.container()
+    
+    # Display elapsed time placeholder
+    elapsed_time_placeholder = st.empty()
 
     # Combine all URLs to be crawled
     all_urls_to_crawl = set(specific_urls or [])
@@ -578,7 +803,9 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
             username_selector=username_selector,
             password_selector=password_selector,
             submit_selector=submit_selector,
-            additional_urls=list(all_urls_to_crawl)
+            additional_urls=list(all_urls_to_crawl),
+            max_pages=max_pages,
+            metrics=metrics
         )
     )
 
@@ -606,12 +833,19 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
             content = crawled_content[url]
             current_eval += 1
             
+            # Update elapsed time display
+            if metrics and metrics.time.start_time:
+                elapsed = (datetime.now() - metrics.time.start_time).total_seconds()
+                hours, remainder = divmod(int(elapsed), 3600)
+                minutes, secs = divmod(remainder, 60)
+                elapsed_time_placeholder.info(f"⏱️ Elapsed Time: {hours:02d}:{minutes:02d}:{secs:02d}")
+            
             with progress_container:
                 progress_bar.progress(current_eval / total_evaluations if total_evaluations > 0 else 0)
                 status_text.info(f"⏳ Processing: **{heuristic}** on {url} ({current_eval}/{total_evaluations})")
 
             prompt_with_url = prompt.replace("[Enter Website URL Here]", url)
-            result = evaluate_heuristic_with_llm(prompt_with_url, content)
+            result = evaluate_heuristic_with_llm(prompt_with_url, content, metrics=metrics, model=model)
             
             if heuristic not in evaluations:
                 evaluations[heuristic] = {}
@@ -633,19 +867,23 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
 
     return evaluations
 
-def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None, heuristic_url_map=None):
+
+def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None, heuristic_url_map=None, metrics: MetricsTracker = None, model: str = "gpt-4o-mini"):
     evaluations = {}
 
     st.subheader("📊 Live Evaluation Progress")
     progress_container = st.container()
     results_container = st.container()
+    
+    # Display elapsed time placeholder
+    elapsed_time_placeholder = st.empty()
 
     all_urls_to_crawl = set(specific_urls or [])
     if heuristic_url_map:
         for urls in heuristic_url_map.values():
             all_urls_to_crawl.update(urls)
 
-    crawled_content = asyncio.run(crawl_all_pages_no_login(start_url, additional_urls=list(all_urls_to_crawl)))
+    crawled_content = asyncio.run(crawl_all_pages_no_login(start_url, additional_urls=list(all_urls_to_crawl), max_pages=max_pages_to_evaluate, metrics=metrics))
 
     total_evaluations = 0
     for heuristic in prompt_map:
@@ -670,13 +908,20 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
             
             content = crawled_content[url]
             current_eval += 1
+            
+            # Update elapsed time display
+            if metrics and metrics.time.start_time:
+                elapsed = (datetime.now() - metrics.time.start_time).total_seconds()
+                hours, remainder = divmod(int(elapsed), 3600)
+                minutes, secs = divmod(remainder, 60)
+                elapsed_time_placeholder.info(f"⏱️ Elapsed Time: {hours:02d}:{minutes:02d}:{secs:02d}")
 
             with progress_container:
                 progress_bar.progress(current_eval / total_evaluations if total_evaluations > 0 else 0)
                 status_text.info(f"⏳ Processing: **{heuristic}** on {url} ({current_eval}/{total_evaluations})")
 
             prompt_with_url = prompt.replace("[Enter Website URL Here]", url)
-            result = evaluate_heuristic_with_llm(prompt_with_url, content)
+            result = evaluate_heuristic_with_llm(prompt_with_url, content, metrics=metrics, model=model)
 
             if heuristic not in evaluations:
                 evaluations[heuristic] = {}
@@ -697,6 +942,7 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
         status_text.success(f"✅ All evaluations complete! ({total_evaluations} total)")
 
     return evaluations
+
 
 def main():
     st.header("Heuristic Evaluation")
@@ -729,13 +975,25 @@ def main():
         st.title("Target Website")
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
-        max_pages_to_evaluate = st.number_input(
-            "Max pages to evaluate", min_value=1, max_value=100, value=1
+        max_pages_to_evaluate = st.number_input("Max pages to evaluate", min_value=1, max_value=100, value=1)
+        specific_urls_input = st.text_area("Enter specific URLs to evaluate (one per line)")
+        
+        # Model selection
+        st.title("Model Selection")
+        from metrics_tracker import MODEL_PRICING
+        model_options = list(MODEL_PRICING.keys())
+        model_descriptions = {
+            "gpt-4o": "GPT-4o - Most capable, higher cost ($5/$15 per 1M tokens)",
+            "gpt-4o-mini": "GPT-4o-mini - Cost-effective, good quality ($0.15/$0.60 per 1M tokens)"
+        }
+        selected_model = st.selectbox(
+            "Select LLM Model",
+            options=model_options,
+            index=1,  # Default to gpt-4o-mini
+            format_func=lambda x: model_descriptions.get(x, x),
+            help="Choose the model for evaluation. GPT-4o-mini is recommended for most evaluations."
         )
-        specific_urls_input = st.text_area(
-            "Enter specific URLs to evaluate (one per line)"
-        )
-
+        
         # Per-heuristic URL assignment
         assign_per_heuristic = st.checkbox("Assign URLs to specific heuristics")
         
@@ -809,79 +1067,189 @@ def main():
                 ]
 
     if st.button("Run Crawl and Evaluate"):
-        specific_urls = [
-            url.strip() for url in specific_urls_input.split("\n") if url.strip()
-        ]
-        with st.spinner("Crawling site and evaluating..."):
-            if requires_login:
-                evaluations = run_crawl_and_evaluate_stream(
-                    start_url,
-                    username,
-                    password,
-                    login_url,
-                    username_selector,
-                    password_selector,
-                    submit_selector,
-                    st.session_state.prompt_map,
-                    specific_urls=specific_urls,
-                    heuristic_url_map=heuristic_url_map,
-                )
-            else:
-                evaluations = run_crawl_and_evaluate_public(
-                    start_url,
-                    st.session_state.prompt_map,
-                    max_pages_to_evaluate=int(max_pages_to_evaluate),
-                    specific_urls=specific_urls,
-                    heuristic_url_map=heuristic_url_map,
-                )
-            st.session_state["evaluations"] = evaluations
-            st.success("Evaluation complete")
-            st.json(st.session_state["evaluations"])
+        if not st.session_state.prompt_map:
+            st.error("Please upload an Excel file with prompts before running the evaluation.")
+        else:
+            specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
+            
+            # Initialize MetricsTracker with selected model
+            metrics = MetricsTracker(model=selected_model)
+            metrics.crawl.pages_requested = int(max_pages_to_evaluate)
+            metrics.start_session()
+            
+            with st.spinner("Crawling site and evaluating..."):
+                if requires_login:
+                    evaluations = run_crawl_and_evaluate_stream(
+                        start_url, username, password, login_url,
+                        username_selector, password_selector, submit_selector, st.session_state.prompt_map,
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map,
+                        max_pages=int(max_pages_to_evaluate),
+                        metrics=metrics,
+                        model=selected_model
+                    )
+                else:
+                    evaluations = run_crawl_and_evaluate_public(
+                        start_url,
+                        st.session_state.prompt_map,
+                        max_pages_to_evaluate=int(max_pages_to_evaluate),
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map,
+                        metrics=metrics,
+                        model=selected_model
+                    )
+                
+                # End session and get metrics summary
+                metrics.end_session()
+                metrics_summary = metrics.get_summary()
+                st.session_state["metrics_summary"] = metrics_summary
+                st.session_state["evaluations"] = evaluations
+                st.session_state["crawled_urls"] = metrics.crawl.crawled_urls
+                
+                st.success("Evaluation complete")
+                
+                # Display metrics summary
+                st.subheader("📊 Execution Metrics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Elapsed Time", metrics_summary["elapsed_time"])
+                with col2:
+                    st.metric("Pages Crawled", f"{metrics_summary['pages_crawled']}/{metrics_summary['pages_requested']}")
+                with col3:
+                    st.metric("Total Tokens", f"{metrics_summary['total_tokens']:,}")
+                with col4:
+                    st.metric("Estimated Cost", f"${metrics_summary['estimated_cost_usd']:.4f}")
+                
+                # Display skip reasons if any
+                if metrics_summary["pages_skipped"] > 0:
+                    with st.expander(f"⚠️ {metrics_summary['pages_skipped']} pages skipped - Click to see details"):
+                        # Explanation of why pages are skipped
+                        st.info("""
+**Why are pages skipped?** This is normal and intentional behavior:
+- **duplicate**: Same URL found on multiple pages - avoids redundant evaluation
+- **max_limit_reached**: User-defined page limit respected - controls costs
+- **domain_mismatch**: External links ignored - only target site evaluated
+- **max_depth_exceeded**: Deep pages skipped - focuses on main content
+- **navigation_error**: Page failed to load - logged for transparency
+
+Skipping duplicates is *optimization*, not an error. It saves time and tokens.
+                        """)
+                        
+                        for reason, urls in metrics_summary["skip_reasons"].items():
+                            st.markdown(f"### {reason}: {len(urls)} pages")
+                            st.markdown("---")
+                            for url in urls:  # Show ALL URLs
+                                st.write(f"  - `{url}`")
+                            st.markdown("")
+                        
+                        # Create downloadable skip log
+                        skip_log = "SKIP REASONS LOG\n" + "="*50 + "\n\n"
+                        skip_log += "WHY PAGES ARE SKIPPED (This is normal behavior):\n"
+                        skip_log += "- duplicate: Same URL found multiple times - avoids redundant work\n"
+                        skip_log += "- max_limit_reached: User page limit respected\n"
+                        skip_log += "- domain_mismatch: External links ignored\n"
+                        skip_log += "- max_depth_exceeded: Deep pages skipped\n"
+                        skip_log += "- navigation_error: Page failed to load\n\n"
+                        skip_log += "="*50 + "\n\n"
+                        
+                        for reason, urls in metrics_summary["skip_reasons"].items():
+                            skip_log += f"\n{reason.upper()} ({len(urls)} pages)\n"
+                            skip_log += "-"*40 + "\n"
+                            for url in urls:
+                                skip_log += f"  {url}\n"
+                        
+                        st.download_button(
+                            label="📥 Download Skip Log (Proof of Transparency)",
+                            data=skip_log,
+                            file_name="crawl_skip_log.txt",
+                            mime="text/plain"
+                        )
+                
+                st.json(st.session_state["evaluations"])
 
     if "evaluations" in st.session_state:
         st.subheader("Saved Evaluation Output")
 
         if st.button("Generate Enhanced Report (HTML)"):
             with st.spinner("Generating comprehensive HTML report..."):
+                # Get metrics from session state if available
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                
+                # Get model from metrics_summary or use default
+                report_model = metrics_summary.get("model_used", "gpt-4o-mini") if metrics_summary else "gpt-4o-mini"
+                
                 analysis_json = analyze_each_heuristic_individually_for_report(
-                    st.session_state["evaluations"]
+                    st.session_state["evaluations"],
+                    model=report_model
                 )
                 st.session_state["analysis_json"] = analysis_json
-
+                
                 if not analysis_json:
                     st.error("Failed to generate analysis. Please try again.")
                     return
-
+                
+                # FIX: Use login_url if available, otherwise use start_url
                 url_to_parse = login_url if (requires_login and login_url) else start_url
-                site_name = (
-                    url_to_parse.replace("https://", "").replace("http://", "").split("/")[0]
-                )
+                site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0] if url_to_parse else "Website"
+                
                 html_report = generate_html_from_analysis_json(
-                    analysis_json,
+                    analysis_json, 
                     site_name=site_name,
                     site_description="Comprehensive UX Heuristic Analysis",
+                    metrics_summary=metrics_summary
                 )
+                
                 st.session_state["html_report"] = html_report
 
     if "html_report" in st.session_state and st.session_state["html_report"]:
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
+        
         with col1:
             st.download_button(
-                label="📄 Download Enhanced HTML Report",
+                label="📄 Download HTML Report (Client)",
                 data=st.session_state["html_report"],
-                file_name="enhanced_heuristic_evaluation_report.html",
+                file_name="heuristic_evaluation_report_client.html",
                 mime="text/html",
+                help="Client-facing report without detailed URL lists"
             )
         with col2:
             if "analysis_json" in st.session_state:
-                csv_data = convert_analysis_to_csv(st.session_state["analysis_json"])
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                csv_data = convert_analysis_to_csv(st.session_state["analysis_json"], metrics_summary=metrics_summary)
                 st.download_button(
                     label="📄 Download CSV Report",
                     data=csv_data,
                     file_name="heuristic_evaluation_report.csv",
                     mime="text/csv",
                 )
-
+        with col3:
+            if "analysis_json" in st.session_state and "evaluations" in st.session_state:
+                # Generate internal Excel report
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                if metrics_summary:
+                    # Recreate MetricsTracker from summary (for report generation)
+                    temp_metrics = MetricsTracker(model=metrics_summary.get("model_used", "gpt-4o-mini"))
+                    temp_metrics.crawl.pages_requested = metrics_summary.get("pages_requested", 0)
+                    temp_metrics.crawl.pages_crawled = metrics_summary.get("pages_crawled", 0)
+                    temp_metrics.crawl.pages_skipped = metrics_summary.get("pages_skipped", 0)
+                    temp_metrics.crawl.skip_reasons = metrics_summary.get("skip_reasons", {})
+                    temp_metrics.crawl.crawled_urls = st.session_state.get("crawled_urls", [])
+                    temp_metrics.tokens.total_input_tokens = metrics_summary.get("total_input_tokens", 0)
+                    temp_metrics.tokens.total_output_tokens = metrics_summary.get("total_output_tokens", 0)
+                    temp_metrics.tokens.api_calls = metrics_summary.get("api_calls", 0)
+                    
+                    report_gen = InternalReportGenerator(temp_metrics, st.session_state["analysis_json"])
+                    url_to_parse = login_url if (requires_login and login_url) else start_url
+                    site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0] if url_to_parse else "Website"
+                    excel_data = report_gen.generate_excel_report(site_name=site_name)
+                    
+                    st.download_button(
+                        label="📊 Download Internal Report (Excel)",
+                        data=excel_data,
+                        file_name="internal_analysis_report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help="Detailed internal report with all URLs and metrics"
+                    )
 
 
 if __name__ == "__main__":

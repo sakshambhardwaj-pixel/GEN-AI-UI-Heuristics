@@ -1,0 +1,4 @@
+# file: C:\Users\saksham.bhardwaj\GEN-AI-UI-Heuristics\GEN-AI-Heuristics\metrics_tracker.py
+# hypothesis_version: 6.148.5
+
+[0.0, 0.00015, 0.0006, 0.005, 0.015, 1000, 3600, 'api_calls', 'cost_per_page', 'description', 'elapsed_seconds', 'elapsed_time', 'estimated_cost_usd', 'gpt-4o', 'gpt-4o-mini', 'input', 'model_used', 'output', 'pages_crawled', 'pages_requested', 'pages_skipped', 'skip_reasons', 'total_input_tokens', 'total_output_tokens', 'total_tokens']

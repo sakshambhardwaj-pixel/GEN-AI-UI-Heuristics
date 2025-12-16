@@ -13,4 +13,6 @@ dependencies = [
     "playwright>=1.55.0",
     "python-dotenv>=1.1.1",
     "streamlit>=1.50.0",
+    "hypothesis>=6.100.0",
+    "pytest>=8.0.0",
 ]
