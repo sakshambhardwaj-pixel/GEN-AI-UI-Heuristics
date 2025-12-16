@@ -172,3 +172,5 @@ urllib3==2.5.0
     # via requests
 watchdog==6.0.0 ; sys_platform != 'darwin'
     # via streamlit
+requests
+beautifulsoup4

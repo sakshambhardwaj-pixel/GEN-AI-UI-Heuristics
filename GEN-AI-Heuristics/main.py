@@ -3,6 +3,8 @@ import sys
 import json
 import sys
 from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -10,7 +12,6 @@ import pandas as pd
 from playwright.async_api import async_playwright
 from urllib.parse import urlparse
 import streamlit as st
-from bs4 import BeautifulSoup
 from openai import OpenAI
 from io import BytesIO
 import re
@@ -81,6 +82,7 @@ def convert_analysis_to_csv(analysis_json, metrics_summary=None):
     df = pd.DataFrame(records)
     return df.to_csv(index=False).encode('utf-8')
 
+
 def fetch_and_map_prompts(uploaded_file):
     if uploaded_file is None:
         st.warning("Please upload an Excel file to proceed.")
@@ -99,6 +101,34 @@ def fetch_and_map_prompts(uploaded_file):
             mapping[heuristic] = prompt
     return mapping
 
+
+@st.cache_data
+def fetch_wcag_guidelines():
+    """
+    Fetches WCAG guidelines from the W3C website.
+    Note: This scraper is tightly coupled to the HTML structure of the page and may break if the structure changes.
+    """
+    url = "https://www.w3.org/WAI/WCAG22/quickref/"
+    guidelines = {}
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+
+        for h4 in soup.find_all("h4", id=lambda x: x and x.startswith('qr-')):
+            title = h4.get_text(strip=True).replace("\n", " ").replace("  ", " ")
+            sc_body = h4.find_parent("article").find("div", class_="sc-text")
+            if sc_body:
+                description = sc_body.get_text(strip=True, separator='\n')
+                prompt = f"Evaluate the website against the following WCAG 2.2 Success Criterion:\n\n**{title}**\n\n{description}\n\nPlease provide a detailed analysis of the website's compliance with this criterion. Provide a score from 0-4 (0=fail, 4=exceeds) and justify with examples from the page."
+                guidelines[title] = prompt
+
+        return guidelines
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching WCAG guidelines: {e}")
+        return {}
+
+
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     for script in soup(["script", "style"]):
@@ -106,6 +136,7 @@ def clean_html_content(html_content):
     text = soup.get_text(separator=' ')
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
 
 def format_llm_response(response: str) -> str:
     """Format LLM response from OpenAI ChatCompletion object or string for better viewing"""
@@ -132,6 +163,7 @@ def format_llm_response(response: str) -> str:
     text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
     text = text.strip() + '\n' + '='*60 + '\n'
     return text
+
 
 def evaluate_heuristic_with_llm(prompt: str, page_content: str, metrics: MetricsTracker = None, model: str = "gpt-4o-mini") -> str:
     """Evaluate heuristics using OpenAI's API with token tracking and model selection"""
@@ -178,6 +210,7 @@ def evaluate_heuristic_with_llm(prompt: str, page_content: str, metrics: Metrics
     except Exception as e:
         print(f"Error calling OpenAI API: {e}")
         return f"Error: {str(e)}"
+
 
 def analyze_each_heuristic_individually_for_report(evaluations: dict, metrics: MetricsTracker = None, model: str = "gpt-4o-mini") -> dict:
     """Analyze each heuristic individually to prevent crashes with large data"""
@@ -351,6 +384,7 @@ def analyze_each_heuristic_individually_for_report(evaluations: dict, metrics: M
     
     return final_analysis
 
+
 def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -> dict:
     """Create fallback analysis for a specific heuristic"""
     return {
@@ -390,6 +424,7 @@ def create_individual_fallback_analysis(heuristic_name: str, pages_data: dict) -
         "analyzed_urls": list(pages_data.keys()),
         "confidence_score": "Low"
     }
+
 
 async def navigate_authenticated_site(
     page,
@@ -601,6 +636,7 @@ async def login_and_crawl_all_pages(url: str, username: str, password: str, logi
 
         await browser.close()
         return url_to_content
+
 
 async def crawl_all_pages_no_login(start_url: str, additional_urls: list[str] = None, max_pages: int = 50, metrics: MetricsTracker = None):
     async with async_playwright() as p:
@@ -831,6 +867,7 @@ def run_crawl_and_evaluate_stream(start_url, username, password, login_url, user
 
     return evaluations
 
+
 def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: int = 1, specific_urls=None, heuristic_url_map=None, metrics: MetricsTracker = None, model: str = "gpt-4o-mini"):
     evaluations = {}
 
@@ -906,13 +943,35 @@ def run_crawl_and_evaluate_public(start_url, prompt_map, max_pages_to_evaluate: 
 
     return evaluations
 
+
 def main():
     st.header("Heuristic Evaluation")
 
-
     with st.sidebar:
-        st.title("Upload Excel file")
-        uploaded_file = st.file_uploader("Upload Heuristic Excel file with AI Prompts sheet", type=["xlsx", "xls"])
+        st.title("Evaluation Source")
+        use_heuristic_sheet = st.toggle("Use UI Heuristic Prompt Sheet", value=True)
+
+        uploaded_file = None
+        if use_heuristic_sheet:
+            uploaded_file = st.file_uploader(
+                "Upload Heuristic Excel file",
+                type=["xlsx", "xls"],
+                help="Upload an Excel file with a sheet named 'AI Prompts' containing heuristics and their corresponding prompts.",
+            )
+
+        # Add WCAG Guidelines section
+        st.title("WCAG Guidelines")
+        wcag_guidelines = fetch_wcag_guidelines()
+        selected_wcag_guidelines = []
+        if wcag_guidelines:
+            with st.expander("Select WCAG Guidelines to Evaluate"):
+                select_all = st.checkbox("Select All", key="select_all_wcag")
+                for guideline in wcag_guidelines.keys():
+                    if st.checkbox(guideline, value=select_all, key=f"wcag_{guideline}"):
+                        selected_wcag_guidelines.append(guideline)
+        else:
+            st.warning("Could not load WCAG guidelines.")
+
         st.title("Target Website")
         requires_login = st.checkbox("Site requires login", value=True)
         start_url = None
@@ -937,123 +996,135 @@ def main():
         
         # Per-heuristic URL assignment
         assign_per_heuristic = st.checkbox("Assign URLs to specific heuristics")
-        heuristic_url_map = {}
-
-        # FIX: Initialize login_url with a default value
-        login_url = None
-        username = None
-        password = None
-        username_selector = None
-        password_selector = None
-        submit_selector = None
         
+        login_url, username, password = None, None, None
+        username_selector, password_selector, submit_selector = None, None, None
+
         if requires_login:
             login_url = st.text_input("Login URL", value="https://www.saucedemo.com/")
             username = st.text_input("Username", value="standard_user")
-            password = st.text_input("Password", value="secret_sauce", type="password")
-        
+            password = st.text_input(
+                "Password", value="secret_sauce", type="password"
+            )
             username_selector = st.text_input(
-                "Username Selector", 
+                "Username Selector",
                 value="#user-name",
                 help="CSS selector for the username input field. Right-click on the username field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #username, .username-field, input[name='username']"
             )
-            
             password_selector = st.text_input(
-                "Password Selector", 
+                "Password Selector",
                 value="#password",
                 help="CSS selector for the password input field. Right-click on the password field in the login page, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #password, .password-field, input[type='password']"
             )
-            
             submit_selector = st.text_input(
-                "Submit Button Selector", 
+                "Submit Button Selector",
                 value="#login-button",
                 help="CSS selector for the login/submit button. Right-click on the login button, select 'Inspect Element', then copy the id (#id) or class (.class) or tag selector. Example: #login-btn, .submit-button, button[type='submit']"
             )
         else:
-            # For public sites: show site URL input when login not required
-            start_url = st.text_input("Site URL", value="https://www.saucedemo.com/", help="Enter the public site URL to crawl")
+            start_url = st.text_input(
+                "Site URL",
+                value="https://www.saucedemo.com/",
+                help="Enter the public site URL to crawl",
+            )
 
-        
-        # Refresh button
         st.markdown("---")
         if st.button("🔄 Refresh", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
+    # --- Main Panel ---
+    prompt_map = {}
+    heuristic_url_map = {}
 
-    if uploaded_file:
-        prompt_map = fetch_and_map_prompts(uploaded_file)
-        st.session_state.prompt_map = prompt_map
-        st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
+    if use_heuristic_sheet:
+        if uploaded_file:
+            prompt_map.update(fetch_and_map_prompts(uploaded_file))
+        else:
+            st.info("Please upload a UI Heuristics Excel file to proceed, or toggle off the option in the sidebar.")
+            return
 
-        if assign_per_heuristic:
-            if "prompt_map" in st.session_state and st.session_state.prompt_map:
-                st.subheader("Assign URLs to Heuristics")
-                for heuristic in st.session_state.prompt_map.keys():
-                    urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
-                    if urls:
-                        heuristic_url_map[heuristic] = [url.strip() for url in urls.split("\n") if url.strip()]
+    if selected_wcag_guidelines:
+        for guideline in selected_wcag_guidelines:
+            if guideline in wcag_guidelines:
+                prompt_map[guideline] = wcag_guidelines[guideline]
 
-        if st.button("Run Crawl and Evaluate"):
-            if not st.session_state.prompt_map:
-                st.error("Please upload an Excel file with prompts before running the evaluation.")
-            else:
-                specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
+    if not prompt_map:
+        st.info("Please select at least one WCAG guideline or upload a heuristic sheet to begin.")
+        return
+
+    st.session_state.prompt_map = prompt_map
+    st.write("Loaded heuristics and prompts:", list(prompt_map.keys()))
+
+    if assign_per_heuristic:
+        st.subheader("Assign URLs to Heuristics")
+        for heuristic in st.session_state.prompt_map.keys():
+            urls = st.text_area(f"URLs for {heuristic}", key=f"urls_{heuristic}")
+            if urls:
+                heuristic_url_map[heuristic] = [
+                    url.strip() for url in urls.split("\n") if url.strip()
+                ]
+
+    if st.button("Run Crawl and Evaluate"):
+        if not st.session_state.prompt_map:
+            st.error("Please upload an Excel file with prompts before running the evaluation.")
+        else:
+            specific_urls = [url.strip() for url in specific_urls_input.split("\n") if url.strip()]
+            
+            # Initialize MetricsTracker with selected model
+            metrics = MetricsTracker(model=selected_model)
+            metrics.crawl.pages_requested = int(max_pages_to_evaluate)
+            metrics.start_session()
+            
+            with st.spinner("Crawling site and evaluating..."):
+                if requires_login:
+                    evaluations = run_crawl_and_evaluate_stream(
+                        start_url, username, password, login_url,
+                        username_selector, password_selector, submit_selector, st.session_state.prompt_map,
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map,
+                        max_pages=int(max_pages_to_evaluate),
+                        metrics=metrics,
+                        model=selected_model
+                    )
+                else:
+                    evaluations = run_crawl_and_evaluate_public(
+                        start_url,
+                        st.session_state.prompt_map,
+                        max_pages_to_evaluate=int(max_pages_to_evaluate),
+                        specific_urls=specific_urls,
+                        heuristic_url_map=heuristic_url_map,
+                        metrics=metrics,
+                        model=selected_model
+                    )
                 
-                # Initialize MetricsTracker with selected model
-                metrics = MetricsTracker(model=selected_model)
-                metrics.crawl.pages_requested = int(max_pages_to_evaluate)
-                metrics.start_session()
+                # End session and get metrics summary
+                metrics.end_session()
+                metrics_summary = metrics.get_summary()
+                st.session_state["metrics_summary"] = metrics_summary
+                st.session_state["evaluations"] = evaluations
+                st.session_state["crawled_urls"] = metrics.crawl.crawled_urls
                 
-                with st.spinner("Crawling site and evaluating..."):
-                    if requires_login:
-                        evaluations = run_crawl_and_evaluate_stream(
-                            start_url, username, password, login_url,
-                            username_selector, password_selector, submit_selector, st.session_state.prompt_map,
-                            specific_urls=specific_urls,
-                            heuristic_url_map=heuristic_url_map,
-                            max_pages=int(max_pages_to_evaluate),
-                            metrics=metrics,
-                            model=selected_model
-                        )
-                    else:
-                        evaluations = run_crawl_and_evaluate_public(
-                            start_url,
-                            st.session_state.prompt_map,
-                            max_pages_to_evaluate=int(max_pages_to_evaluate),
-                            specific_urls=specific_urls,
-                            heuristic_url_map=heuristic_url_map,
-                            metrics=metrics,
-                            model=selected_model
-                        )
-                    
-                    # End session and get metrics summary
-                    metrics.end_session()
-                    metrics_summary = metrics.get_summary()
-                    st.session_state["metrics_summary"] = metrics_summary
-                    st.session_state["evaluations"] = evaluations
-                    st.session_state["crawled_urls"] = metrics.crawl.crawled_urls
-                    
-                    st.success("Evaluation complete")
-                    
-                    # Display metrics summary
-                    st.subheader("📊 Execution Metrics")
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Elapsed Time", metrics_summary["elapsed_time"])
-                    with col2:
-                        st.metric("Pages Crawled", f"{metrics_summary['pages_crawled']}/{metrics_summary['pages_requested']}")
-                    with col3:
-                        st.metric("Total Tokens", f"{metrics_summary['total_tokens']:,}")
-                    with col4:
-                        st.metric("Estimated Cost", f"${metrics_summary['estimated_cost_usd']:.4f}")
-                    
-                    # Display skip reasons if any
-                    if metrics_summary["pages_skipped"] > 0:
-                        with st.expander(f"⚠️ {metrics_summary['pages_skipped']} pages skipped - Click to see details"):
-                            # Explanation of why pages are skipped
-                            st.info("""
+                st.success("Evaluation complete")
+                
+                # Display metrics summary
+                st.subheader("📊 Execution Metrics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Elapsed Time", metrics_summary["elapsed_time"])
+                with col2:
+                    st.metric("Pages Crawled", f"{metrics_summary['pages_crawled']}/{metrics_summary['pages_requested']}")
+                with col3:
+                    st.metric("Total Tokens", f"{metrics_summary['total_tokens']:,}")
+                with col4:
+                    st.metric("Estimated Cost", f"${metrics_summary['estimated_cost_usd']:.4f}")
+                
+                # Display skip reasons if any
+                if metrics_summary["pages_skipped"] > 0:
+                    with st.expander(f"⚠️ {metrics_summary['pages_skipped']} pages skipped - Click to see details"):
+                        # Explanation of why pages are skipped
+                        st.info("""
 **Why are pages skipped?** This is normal and intentional behavior:
 - **duplicate**: Same URL found on multiple pages - avoids redundant evaluation
 - **max_limit_reached**: User-defined page limit respected - controls costs
@@ -1062,128 +1133,123 @@ def main():
 - **navigation_error**: Page failed to load - logged for transparency
 
 Skipping duplicates is *optimization*, not an error. It saves time and tokens.
-                            """)
-                            
-                            for reason, urls in metrics_summary["skip_reasons"].items():
-                                st.markdown(f"### {reason}: {len(urls)} pages")
-                                st.markdown("---")
-                                for url in urls:  # Show ALL URLs
-                                    st.write(f"  - `{url}`")
-                                st.markdown("")
-                            
-                            # Create downloadable skip log
-                            skip_log = "SKIP REASONS LOG\n" + "="*50 + "\n\n"
-                            skip_log += "WHY PAGES ARE SKIPPED (This is normal behavior):\n"
-                            skip_log += "- duplicate: Same URL found multiple times - avoids redundant work\n"
-                            skip_log += "- max_limit_reached: User page limit respected\n"
-                            skip_log += "- domain_mismatch: External links ignored\n"
-                            skip_log += "- max_depth_exceeded: Deep pages skipped\n"
-                            skip_log += "- navigation_error: Page failed to load\n\n"
-                            skip_log += "="*50 + "\n\n"
-                            
-                            for reason, urls in metrics_summary["skip_reasons"].items():
-                                skip_log += f"\n{reason.upper()} ({len(urls)} pages)\n"
-                                skip_log += "-"*40 + "\n"
-                                for url in urls:
-                                    skip_log += f"  {url}\n"
-                            
-                            st.download_button(
-                                label="📥 Download Skip Log (Proof of Transparency)",
-                                data=skip_log,
-                                file_name="crawl_skip_log.txt",
-                                mime="text/plain"
-                            )
-                    
-                    st.json(st.session_state["evaluations"])
-
-        if "evaluations" in st.session_state:
-            st.subheader("Saved Evaluation Output")
-
-            if st.button("Generate Enhanced Report (HTML)"):
-                with st.spinner("Generating comprehensive HTML report..."):
-                    # Get metrics from session state if available
-                    metrics_summary = st.session_state.get("metrics_summary", None)
-                    
-                    # Get model from metrics_summary or use default
-                    report_model = metrics_summary.get("model_used", "gpt-4o-mini") if metrics_summary else "gpt-4o-mini"
-                    
-                    analysis_json = analyze_each_heuristic_individually_for_report(
-                        st.session_state["evaluations"],
-                        model=report_model
-                    )
-                    st.session_state["analysis_json"] = analysis_json
-                    
-                    if not analysis_json:
-                        st.error("Failed to generate analysis. Please try again.")
-                        return
-                    
-                    # FIX: Use login_url if available, otherwise use start_url
-                    url_to_parse = login_url if (requires_login and login_url) else start_url
-                    site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0]
-                    
-                    html_report = generate_html_from_analysis_json(
-                        analysis_json, 
-                        site_name=site_name,
-                        site_description="Comprehensive UX Heuristic Analysis",
-                        metrics_summary=metrics_summary
-                    )
-                    
-                    st.session_state["html_report"] = html_report
-
-        if "html_report" in st.session_state and st.session_state["html_report"]:
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.download_button(
-                    label="📄 Download HTML Report (Client)",
-                    data=st.session_state["html_report"],
-                    file_name="heuristic_evaluation_report_client.html",
-                    mime="text/html",
-                    help="Client-facing report without detailed URL lists"
-                )
-            with col2:
-                if "analysis_json" in st.session_state:
-                    metrics_summary = st.session_state.get("metrics_summary", None)
-                    csv_data = convert_analysis_to_csv(st.session_state["analysis_json"], metrics_summary=metrics_summary)
-                    st.download_button(
-                        label="📄 Download CSV Report",
-                        data=csv_data,
-                        file_name="heuristic_evaluation_report.csv",
-                        mime="text/csv",
-                    )
-            with col3:
-                if "analysis_json" in st.session_state and "evaluations" in st.session_state:
-                    # Generate internal Excel report
-                    metrics_summary = st.session_state.get("metrics_summary", None)
-                    if metrics_summary:
-                        # Recreate MetricsTracker from summary (for report generation)
-                        # In a real scenario, we'd store the MetricsTracker in session state
-                        # For now, we'll create a minimal version
-                        temp_metrics = MetricsTracker(model=metrics_summary.get("model_used", "gpt-4o-mini"))
-                        temp_metrics.crawl.pages_requested = metrics_summary.get("pages_requested", 0)
-                        temp_metrics.crawl.pages_crawled = metrics_summary.get("pages_crawled", 0)
-                        temp_metrics.crawl.pages_skipped = metrics_summary.get("pages_skipped", 0)
-                        temp_metrics.crawl.skip_reasons = metrics_summary.get("skip_reasons", {})
-                        temp_metrics.crawl.crawled_urls = st.session_state.get("crawled_urls", [])
-                        temp_metrics.tokens.total_input_tokens = metrics_summary.get("total_input_tokens", 0)
-                        temp_metrics.tokens.total_output_tokens = metrics_summary.get("total_output_tokens", 0)
-                        temp_metrics.tokens.api_calls = metrics_summary.get("api_calls", 0)
+                        """)
                         
-                        report_gen = InternalReportGenerator(temp_metrics, st.session_state["analysis_json"])
-                        url_to_parse = login_url if (requires_login and login_url) else start_url
-                        site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0] if url_to_parse else "Website"
-                        excel_data = report_gen.generate_excel_report(site_name=site_name)
+                        for reason, urls in metrics_summary["skip_reasons"].items():
+                            st.markdown(f"### {reason}: {len(urls)} pages")
+                            st.markdown("---")
+                            for url in urls:  # Show ALL URLs
+                                st.write(f"  - `{url}`")
+                            st.markdown("")
+                        
+                        # Create downloadable skip log
+                        skip_log = "SKIP REASONS LOG\n" + "="*50 + "\n\n"
+                        skip_log += "WHY PAGES ARE SKIPPED (This is normal behavior):\n"
+                        skip_log += "- duplicate: Same URL found multiple times - avoids redundant work\n"
+                        skip_log += "- max_limit_reached: User page limit respected\n"
+                        skip_log += "- domain_mismatch: External links ignored\n"
+                        skip_log += "- max_depth_exceeded: Deep pages skipped\n"
+                        skip_log += "- navigation_error: Page failed to load\n\n"
+                        skip_log += "="*50 + "\n\n"
+                        
+                        for reason, urls in metrics_summary["skip_reasons"].items():
+                            skip_log += f"\n{reason.upper()} ({len(urls)} pages)\n"
+                            skip_log += "-"*40 + "\n"
+                            for url in urls:
+                                skip_log += f"  {url}\n"
                         
                         st.download_button(
-                            label="📊 Download Internal Report (Excel)",
-                            data=excel_data,
-                            file_name="internal_analysis_report.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            help="Detailed internal report with all URLs and metrics"
+                            label="📥 Download Skip Log (Proof of Transparency)",
+                            data=skip_log,
+                            file_name="crawl_skip_log.txt",
+                            mime="text/plain"
                         )
-    else:
-        st.info("Please upload an Excel file to start.")
+                
+                st.json(st.session_state["evaluations"])
 
+    if "evaluations" in st.session_state:
+        st.subheader("Saved Evaluation Output")
+
+        if st.button("Generate Enhanced Report (HTML)"):
+            with st.spinner("Generating comprehensive HTML report..."):
+                # Get metrics from session state if available
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                
+                # Get model from metrics_summary or use default
+                report_model = metrics_summary.get("model_used", "gpt-4o-mini") if metrics_summary else "gpt-4o-mini"
+                
+                analysis_json = analyze_each_heuristic_individually_for_report(
+                    st.session_state["evaluations"],
+                    model=report_model
+                )
+                st.session_state["analysis_json"] = analysis_json
+                
+                if not analysis_json:
+                    st.error("Failed to generate analysis. Please try again.")
+                    return
+                
+                # FIX: Use login_url if available, otherwise use start_url
+                url_to_parse = login_url if (requires_login and login_url) else start_url
+                site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0] if url_to_parse else "Website"
+                
+                html_report = generate_html_from_analysis_json(
+                    analysis_json, 
+                    site_name=site_name,
+                    site_description="Comprehensive UX Heuristic Analysis",
+                    metrics_summary=metrics_summary
+                )
+                
+                st.session_state["html_report"] = html_report
+
+    if "html_report" in st.session_state and st.session_state["html_report"]:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.download_button(
+                label="📄 Download HTML Report (Client)",
+                data=st.session_state["html_report"],
+                file_name="heuristic_evaluation_report_client.html",
+                mime="text/html",
+                help="Client-facing report without detailed URL lists"
+            )
+        with col2:
+            if "analysis_json" in st.session_state:
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                csv_data = convert_analysis_to_csv(st.session_state["analysis_json"], metrics_summary=metrics_summary)
+                st.download_button(
+                    label="📄 Download CSV Report",
+                    data=csv_data,
+                    file_name="heuristic_evaluation_report.csv",
+                    mime="text/csv",
+                )
+        with col3:
+            if "analysis_json" in st.session_state and "evaluations" in st.session_state:
+                # Generate internal Excel report
+                metrics_summary = st.session_state.get("metrics_summary", None)
+                if metrics_summary:
+                    # Recreate MetricsTracker from summary (for report generation)
+                    temp_metrics = MetricsTracker(model=metrics_summary.get("model_used", "gpt-4o-mini"))
+                    temp_metrics.crawl.pages_requested = metrics_summary.get("pages_requested", 0)
+                    temp_metrics.crawl.pages_crawled = metrics_summary.get("pages_crawled", 0)
+                    temp_metrics.crawl.pages_skipped = metrics_summary.get("pages_skipped", 0)
+                    temp_metrics.crawl.skip_reasons = metrics_summary.get("skip_reasons", {})
+                    temp_metrics.crawl.crawled_urls = st.session_state.get("crawled_urls", [])
+                    temp_metrics.tokens.total_input_tokens = metrics_summary.get("total_input_tokens", 0)
+                    temp_metrics.tokens.total_output_tokens = metrics_summary.get("total_output_tokens", 0)
+                    temp_metrics.tokens.api_calls = metrics_summary.get("api_calls", 0)
+                    
+                    report_gen = InternalReportGenerator(temp_metrics, st.session_state["analysis_json"])
+                    url_to_parse = login_url if (requires_login and login_url) else start_url
+                    site_name = url_to_parse.replace("https://", "").replace("http://", "").split('/')[0] if url_to_parse else "Website"
+                    excel_data = report_gen.generate_excel_report(site_name=site_name)
+                    
+                    st.download_button(
+                        label="📊 Download Internal Report (Excel)",
+                        data=excel_data,
+                        file_name="internal_analysis_report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help="Detailed internal report with all URLs and metrics"
+                    )
 
 
 if __name__ == "__main__":
